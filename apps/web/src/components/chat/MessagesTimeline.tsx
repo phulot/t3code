@@ -37,6 +37,7 @@ import {
   resolveDiffThemeName,
   resolveFileDiffPath,
 } from "../../lib/diffRendering";
+import { READABLE_DIFF_OPTIONS, READABLE_DIFF_UNSAFE_CSS } from "../../lib/diffAppearance";
 import ChatMarkdown from "../ChatMarkdown";
 import {
   BotIcon,
@@ -1683,9 +1684,11 @@ function UserMessageReviewCommentCard({ comment }: { comment: ReviewCommentConte
             key={resolveFileDiffPath(fileDiff)}
             fileDiff={fileDiff}
             options={{
+              ...READABLE_DIFF_OPTIONS,
               collapsed: false,
               diffStyle: "unified",
               theme: resolveDiffThemeName(ctx.resolvedTheme),
+              unsafeCSS: READABLE_DIFF_UNSAFE_CSS,
             }}
           />
         ))}
