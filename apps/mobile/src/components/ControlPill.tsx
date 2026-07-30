@@ -87,12 +87,17 @@ export function ControlPill(props: {
 // AppCompat popup can't be themed past its stock animation, metrics, and
 // submenu chrome.
 export function ControlPillMenu(
-  props: Omit<ComponentProps<typeof MenuView>, "children" | "themeVariant"> & {
+  props: Omit<ComponentProps<typeof MenuView>, "children" | "disabled" | "themeVariant"> & {
     readonly children: ReactNode;
     readonly className?: string;
+    readonly disabled?: boolean;
   },
 ) {
   const isDarkMode = useColorScheme() === "dark";
+
+  if (props.disabled) {
+    return props.children;
+  }
 
   if (Platform.OS === "android") {
     // Long-press menus keep their child interactive: the child element gets
@@ -132,7 +137,7 @@ export function ControlPillMenu(
     );
   }
 
-  const { className: _className, ...menuProps } = props;
+  const { className: _className, disabled: _disabled, ...menuProps } = props;
   return (
     <MenuView {...menuProps} themeVariant={isDarkMode ? "dark" : "light"}>
       {menuProps.children}

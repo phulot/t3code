@@ -869,10 +869,12 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                 />
                 <ControlPillMenu
                   actions={modelMenuActions}
+                  disabled={showStopAction || props.activeThreadBusy}
                   onPressAction={({ nativeEvent }) => handleModelMenuAction(nativeEvent.event)}
                 >
                   <ComposerToolbarTrigger
                     accessibilityLabel="Model"
+                    disabled={showStopAction || props.activeThreadBusy}
                     iconNode={
                       <ProviderIcon provider={currentModelOption?.providerDriver} size={16} />
                     }
