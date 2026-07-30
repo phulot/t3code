@@ -13,7 +13,8 @@ Methods mirror the `NativeApi` interface defined in `@t3tools/contracts`:
 - `providers.respondToRequest`, `providers.stopSession`
 - `shell.openInEditor`, `server.getConfig`
 
-Codex is the only implemented provider. `claudeCode` is reserved in contracts/UI.
+Provider instances are open routing identities backed by drivers such as Codex, Claude, Cursor, Grok,
+and OpenCode.
 
 ## Client transport
 
@@ -28,3 +29,18 @@ Provider runtime events flow through queue-based workers:
 3. **CheckpointReactor** — captures git checkpoints on turn start/complete, publishes runtime receipts
 
 All three use `DrainableWorker` internally and expose `drain()` for deterministic test synchronization.
+
+## Cross-provider handoffs
+
+The T3 thread is the durable conversation; a provider session is a replaceable execution epoch.
+When a settled thread selects an instance backed by another driver, `ProviderCommandReactor`:
+
+1. derives a bounded handoff from canonical messages, activities, and workspace metadata;
+2. stops the active provider session;
+3. starts the target provider without the previous provider's resume cursor;
+4. appends a `provider.session.switched` activity; and
+5. sends the handoff together with the new user message.
+
+`ProviderService` continues to expose one active runtime binding per thread. This keeps routing stable
+for local, relay, tunnel, and multi-device clients while allowing the execution provider to change at
+a turn boundary.

@@ -3138,6 +3138,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 ) : (
                   <ProviderModelPicker
                     compact={isComposerFooterCompact}
+                    disabled={phase === "connecting" || phase === "running"}
                     activeInstanceId={selectedInstanceId}
                     model={selectedModelForPickerWithCustomFallback}
                     lockedProvider={lockedProvider}
