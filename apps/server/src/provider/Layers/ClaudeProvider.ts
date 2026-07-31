@@ -1,7 +1,6 @@
 import {
   type ClaudeSettings,
   type ModelCapabilities,
-  type ModelSelection,
   type ServerProviderModel,
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
@@ -14,7 +13,6 @@ import * as Result from "effect/Result";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import {
   createModelCapabilities,
-  getModelSelectionStringOptionValue,
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
 } from "@t3tools/shared/model";
@@ -77,14 +75,6 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
           ],
           promptInjectedValues: ["ultrathink"],
         }),
-        buildSelectOptionDescriptor({
-          id: "contextWindow",
-          label: "Context Window",
-          options: [
-            { value: "200k", label: "200k" },
-            { value: "1m", label: "1M", isDefault: true },
-          ],
-        }),
       ],
     }),
   },
@@ -107,19 +97,6 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
             { value: "ultrathink", label: "Ultrathink" },
           ],
           promptInjectedValues: ["ultrathink"],
-        }),
-        buildBooleanOptionDescriptor({
-          id: "fastMode",
-          label: "Fast Mode",
-        }),
-        buildSelectOptionDescriptor({
-          id: "contextWindow",
-          label: "Context Window",
-          // Claude Code selects the 1M variant explicitly (`claude-opus-5[1m]`).
-          options: [
-            { value: "200k", label: "200k" },
-            { value: "1m", label: "1M", isDefault: true },
-          ],
         }),
       ],
     }),
@@ -144,10 +121,6 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
           ],
           promptInjectedValues: ["ultrathink"],
         }),
-        buildBooleanOptionDescriptor({
-          id: "fastMode",
-          label: "Fast Mode",
-        }),
       ],
     }),
   },
@@ -170,10 +143,6 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
           ],
           promptInjectedValues: ["ultrathink"],
         }),
-        buildBooleanOptionDescriptor({
-          id: "fastMode",
-          label: "Fast Mode",
-        }),
       ],
     }),
   },
@@ -195,18 +164,6 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
           ],
           promptInjectedValues: ["ultrathink"],
         }),
-        buildBooleanOptionDescriptor({
-          id: "fastMode",
-          label: "Fast Mode",
-        }),
-        buildSelectOptionDescriptor({
-          id: "contextWindow",
-          label: "Context Window",
-          options: [
-            { value: "200k", label: "200k" },
-            { value: "1m", label: "1M", isDefault: true },
-          ],
-        }),
       ],
     }),
   },
@@ -225,10 +182,6 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
             { value: "high", label: "High", isDefault: true },
             { value: "max", label: "Max" },
           ],
-        }),
-        buildBooleanOptionDescriptor({
-          id: "fastMode",
-          label: "Fast Mode",
         }),
       ],
     }),
@@ -252,15 +205,6 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
           ],
           promptInjectedValues: ["ultrathink"],
         }),
-        buildSelectOptionDescriptor({
-          id: "contextWindow",
-          label: "Context Window",
-          // Sonnet is 200k-default in Claude Code (1M is opt-in there too).
-          options: [
-            { value: "200k", label: "200k", isDefault: true },
-            { value: "1m", label: "1M" },
-          ],
-        }),
       ],
     }),
   },
@@ -281,15 +225,6 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
             { value: "ultrathink", label: "Ultrathink" },
           ],
           promptInjectedValues: ["ultrathink"],
-        }),
-        buildSelectOptionDescriptor({
-          id: "contextWindow",
-          label: "Context Window",
-          // Sonnet is 200k-default in Claude Code (1M is opt-in there too).
-          options: [
-            { value: "200k", label: "200k", isDefault: true },
-            { value: "1m", label: "1M" },
-          ],
         }),
       ],
     }),
@@ -423,29 +358,6 @@ export function normalizeClaudeCliEffort(
 
 export function isClaudeUltracodeEffort(effort: string | null | undefined): boolean {
   return effort === "ultracode";
-}
-
-export function resolveClaudeContextWindow(
-  modelSelection: ModelSelection | undefined,
-): string | undefined {
-  const caps = getClaudeModelCapabilities(modelSelection?.model);
-  const raw = getModelSelectionStringOptionValue(modelSelection, "contextWindow");
-  const descriptors = getProviderOptionDescriptors({
-    caps,
-    ...(raw ? { selections: [{ id: "contextWindow", value: raw }] } : {}),
-  });
-  const descriptor = descriptors.find((candidate) => candidate.id === "contextWindow");
-  const value = getProviderOptionCurrentValue(descriptor);
-  return typeof value === "string" ? value : undefined;
-}
-
-export function resolveClaudeApiModelId(modelSelection: ModelSelection): string {
-  switch (resolveClaudeContextWindow(modelSelection)) {
-    case "1m":
-      return `${modelSelection.model}[1m]`;
-    default:
-      return modelSelection.model;
-  }
 }
 
 function toTitleCaseWords(value: string): string {

@@ -13,7 +13,10 @@ import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import { normalizeCustomModelSlug } from "@t3tools/shared/model";
+import {
+  modelSlugEncodesForbiddenCapability,
+  normalizeCustomModelSlug,
+} from "@t3tools/shared/model";
 import { isWindowsCommandNotFound } from "../processRunner.ts";
 import { createProviderVersionAdvisory } from "./providerMaintenance.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
@@ -149,7 +152,9 @@ export function providerModelsFromSettings(
 
   for (const candidate of customModels) {
     const normalized = normalizeCustomModelSlug(candidate);
-    if (!normalized || seen.has(normalized)) {
+    // Reject custom ids that encode a forbidden fast/1M variant so they are never
+    // listed or selectable, regardless of provider.
+    if (!normalized || seen.has(normalized) || modelSlugEncodesForbiddenCapability(normalized)) {
       continue;
     }
     seen.add(normalized);

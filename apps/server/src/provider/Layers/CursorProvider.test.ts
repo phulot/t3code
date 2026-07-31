@@ -382,11 +382,6 @@ describe("buildCursorCapabilitiesFromConfigOptions", () => {
             { id: "high", label: "High" },
             { id: "xhigh", label: "Extra High" },
           ]),
-          selectDescriptor("contextWindow", "Context", [
-            { id: "272k", label: "272K", isDefault: true },
-            { id: "1m", label: "1M" },
-          ]),
-          booleanDescriptor("fastMode", "Fast", false),
         ],
       }),
     );
@@ -419,7 +414,6 @@ describe("buildCursorCapabilitiesFromConfigOptions", () => {
             { id: "high", label: "High" },
             { id: "max", label: "Max", isDefault: true },
           ]),
-          booleanDescriptor("fastMode", "Fast", true),
           booleanDescriptor("thinking", "Thinking", true),
         ],
       }),
@@ -626,12 +620,18 @@ describe("Cursor parameterized model picker preview gating", () => {
 describe("resolveCursorAcpBaseModelId", () => {
   it("drops bracket traits without rewriting raw ACP model ids", () => {
     expect(resolveCursorAcpBaseModelId("gpt-5.4[reasoning=medium,context=272k]")).toBe("gpt-5.4");
-    expect(resolveCursorAcpBaseModelId("gpt-5.4-medium-fast")).toBe("gpt-5.4-medium-fast");
     expect(resolveCursorAcpBaseModelId("claude-4.6-opus-high-thinking")).toBe(
       "claude-4.6-opus-high-thinking",
     );
     expect(resolveCursorAcpBaseModelId("composer-2")).toBe("composer-2");
     expect(resolveCursorAcpBaseModelId("auto")).toBe("auto");
+  });
+
+  it("rejects a forbidden fast variant, falling back to the default model", () => {
+    // Fast mode is forbidden: a persisted/resumed "-fast" slug must never reach
+    // the subprocess, and a bracketed 1M/fast trait must not survive as the base.
+    expect(resolveCursorAcpBaseModelId("gpt-5.4-medium-fast")).toBe("default");
+    expect(resolveCursorAcpBaseModelId("gpt-5.4[context=1m]")).toBe("gpt-5.4");
   });
 });
 
@@ -640,14 +640,8 @@ describe("resolveCursorAcpConfigUpdates", () => {
     expect(
       resolveCursorAcpConfigUpdates(parameterizedGpt54ConfigOptions, [
         { id: "reasoning", value: "xhigh" },
-        { id: "fastMode", value: true },
-        { id: "contextWindow", value: "1m" },
       ]),
-    ).toEqual([
-      { configId: "reasoning", value: "extra-high" },
-      { configId: "context", value: "1m" },
-      { configId: "fast", value: "true" },
-    ]);
+    ).toEqual([{ configId: "reasoning", value: "extra-high" }]);
   });
 
   it("maps boolean thinking toggles when the model exposes them separately", () => {
@@ -656,14 +650,6 @@ describe("resolveCursorAcpConfigUpdates", () => {
         { id: "thinking", value: false },
       ]),
     ).toEqual([{ configId: "thinking", value: false }]);
-  });
-
-  it("maps explicit fastMode: false so the adapter can clear a prior fast selection", () => {
-    expect(
-      resolveCursorAcpConfigUpdates(parameterizedGpt54ConfigOptions, [
-        { id: "fastMode", value: false },
-      ]),
-    ).toEqual([{ configId: "fast", value: "false" }]);
   });
 
   it("writes Cursor effort changes through the newer model_option config when available", () => {

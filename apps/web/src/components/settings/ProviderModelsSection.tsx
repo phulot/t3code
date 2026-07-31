@@ -16,7 +16,10 @@ import {
   type ProviderInstanceId,
   type ServerProviderModel,
 } from "@t3tools/contracts";
-import { normalizeCustomModelSlug } from "@t3tools/shared/model";
+import {
+  modelSlugEncodesForbiddenCapability,
+  normalizeCustomModelSlug,
+} from "@t3tools/shared/model";
 
 import { cn } from "../../lib/utils";
 import { sortModelsForProviderInstance } from "../../modelOrdering";
@@ -120,6 +123,10 @@ export function ProviderModelsSection({
       setError("That model is already built in.");
       return;
     }
+    if (modelSlugEncodesForbiddenCapability(normalized)) {
+      setError("Fast mode and the 1M context window are disabled, so this model can't be added.");
+      return;
+    }
     if (normalized.length > MAX_CUSTOM_MODEL_LENGTH) {
       setError(`Model slugs must be ${MAX_CUSTOM_MODEL_LENGTH} characters or less.`);
       return;
@@ -203,9 +210,6 @@ export function ProviderModelsSection({
           const canMoveDown =
             nextModel !== undefined && favoriteModelSet.has(nextModel.slug) === isFavorite;
           const descriptors = caps?.optionDescriptors ?? [];
-          if (descriptors.some((descriptor) => descriptor.id === "fastMode")) {
-            capLabels.push("Fast mode");
-          }
           if (descriptors.some((descriptor) => descriptor.id === "thinking")) {
             capLabels.push("Thinking");
           }

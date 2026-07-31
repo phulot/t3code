@@ -257,6 +257,31 @@ export function normalizeCustomModelSlug(model: string | null | undefined): stri
   return model.trim() || null;
 }
 
+/**
+ * Fast mode and the 1M context window are forbidden, and both can be smuggled
+ * back in through a raw model identifier rather than a toggle: Claude re-enables
+ * the 1M context when the model id carries a "[1m]" suffix, and Cursor runs a
+ * "fast" variant when the slug ends in "-fast" (or a bracket group encodes
+ * "1m"/"fast"). Any such identifier must be rejected wherever it can enter the
+ * system (custom models, discovery, resolution).
+ */
+export function modelSlugEncodesForbiddenCapability(slug: string | null | undefined): boolean {
+  if (typeof slug !== "string") {
+    return false;
+  }
+  const value = slug.trim();
+  if (value.length === 0) {
+    return false;
+  }
+  // Cursor fast variant encoded as a "-fast" slug suffix.
+  if (/-fast$/i.test(value)) {
+    return true;
+  }
+  // 1M context or fast encoded inside a bracket group: "[1m]", "[context=1m]",
+  // "[fast]", "[reasoning=high,fast]".
+  return /\[[^\]]*(?:1m|fast)[^\]]*\]/i.test(value);
+}
+
 export function resolveSelectableModel(
   provider: ProviderDriverKind,
   value: string | null | undefined,

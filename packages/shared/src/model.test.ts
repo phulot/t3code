@@ -10,6 +10,7 @@ import {
   getProviderOptionDescriptors,
   getProviderOptionBooleanSelectionValue,
   getProviderOptionStringSelectionValue,
+  modelSlugEncodesForbiddenCapability,
   normalizeCustomModelSlug,
   normalizeModelSlug,
 } from "./model.ts";
@@ -153,5 +154,29 @@ describe("model slug normalization", () => {
 
     expect(normalizeModelSlug("opus", claude)).toBe("claude-opus-5");
     expect(normalizeCustomModelSlug(" opus ")).toBe("opus");
+  });
+});
+
+describe("modelSlugEncodesForbiddenCapability", () => {
+  it("rejects ids that re-enable the 1M context or fast mode", () => {
+    // Claude 1M context suffix.
+    expect(modelSlugEncodesForbiddenCapability("claude-opus-4-8[1m]")).toBe(true);
+    // Cursor fast variant suffix.
+    expect(modelSlugEncodesForbiddenCapability("gpt-5.4-medium-fast")).toBe(true);
+    // Fast / 1M encoded inside a bracket group.
+    expect(modelSlugEncodesForbiddenCapability("gpt-5[context=1m]")).toBe(true);
+    expect(modelSlugEncodesForbiddenCapability("gpt-5[reasoning=high,fast]")).toBe(true);
+    // Case-insensitive.
+    expect(modelSlugEncodesForbiddenCapability("claude-opus-4-8[1M]")).toBe(true);
+  });
+
+  it("accepts ordinary ids without a forbidden marker", () => {
+    expect(modelSlugEncodesForbiddenCapability("claude-opus-4-8")).toBe(false);
+    expect(modelSlugEncodesForbiddenCapability("gpt-5.4-medium")).toBe(false);
+    expect(modelSlugEncodesForbiddenCapability("gpt-5[context=272k]")).toBe(false);
+    // "fast" as part of a longer word is not a "-fast" variant suffix.
+    expect(modelSlugEncodesForbiddenCapability("steadfast")).toBe(false);
+    expect(modelSlugEncodesForbiddenCapability("")).toBe(false);
+    expect(modelSlugEncodesForbiddenCapability(null)).toBe(false);
   });
 });

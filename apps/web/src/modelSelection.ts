@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import {
   createModelSelection,
+  modelSlugEncodesForbiddenCapability,
   normalizeCustomModelSlug,
   resolveSelectableModel,
 } from "@t3tools/shared/model";
@@ -129,7 +130,9 @@ export function normalizeCustomModelSlugs(
       !normalized ||
       normalized.length > MAX_CUSTOM_MODEL_LENGTH ||
       builtInModelSlugs.has(normalized) ||
-      seen.has(normalized)
+      seen.has(normalized) ||
+      // Reject ids that encode a forbidden fast/1M variant.
+      modelSlugEncodesForbiddenCapability(normalized)
     ) {
       continue;
     }

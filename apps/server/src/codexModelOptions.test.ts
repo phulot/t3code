@@ -13,10 +13,21 @@ it("returns the selected Codex service tier id", () => {
   assert.equal(getCodexServiceTierOptionValue(selection), "flex");
 });
 
-it("keeps legacy persisted fast mode selections working", () => {
-  const selection = createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.4", [
+it("never forwards the forbidden fast service tier", () => {
+  const legacyFastMode = createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.4", [
     { id: "fastMode", value: true },
   ]);
+  assert.equal(getCodexServiceTierOptionValue(legacyFastMode), undefined);
 
-  assert.equal(getCodexServiceTierOptionValue(selection), "fast");
+  const legacyFastTier = createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.4", [
+    { id: "serviceTier", value: "fast" },
+  ]);
+  assert.equal(getCodexServiceTierOptionValue(legacyFastTier), undefined);
+
+  // "priority" is the real catalog id of the fast tier (display name "Fast"); a
+  // persisted selection made before the ban stored this raw id and must be blocked.
+  const persistedPriorityTier = createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.4", [
+    { id: "serviceTier", value: "priority" },
+  ]);
+  assert.equal(getCodexServiceTierOptionValue(persistedPriorityTier), undefined);
 });

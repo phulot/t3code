@@ -784,17 +784,13 @@ function normalizeProviderModelOptions(
     }
   }
 
-  // Recover legacy codex fields that lived outside modelOptions.
+  // Recover legacy codex fields that lived outside modelOptions. The legacy
+  // fast service tier (codexFastMode / serviceTier: "fast") is forbidden and
+  // deliberately not recovered.
   if (provider === "codex" && legacy) {
     const codexExtras: ProviderOptionSelection[] = [];
     if (typeof legacy.effort === "string" && legacy.effort.length > 0) {
       codexExtras.push({ id: "reasoningEffort", value: legacy.effort });
-    }
-    const fastMode =
-      legacy.codexFastMode === true ||
-      (typeof legacy.serviceTier === "string" && legacy.serviceTier === "fast");
-    if (fastMode) {
-      codexExtras.push({ id: "fastMode", value: true });
     }
     if (codexExtras.length > 0) {
       const existing = result.codex ?? [];

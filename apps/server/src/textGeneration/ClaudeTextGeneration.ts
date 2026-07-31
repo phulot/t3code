@@ -35,12 +35,12 @@ import {
 import {
   getModelSelectionStringOptionValue,
   getProviderOptionDescriptors,
+  modelSlugEncodesForbiddenCapability,
 } from "@t3tools/shared/model";
 import {
   getClaudeModelCapabilities,
   isClaudeUltracodeEffort,
   normalizeClaudeCliEffort,
-  resolveClaudeApiModelId,
   resolveClaudeEffort,
 } from "../provider/Layers/ClaudeProvider.ts";
 import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
@@ -137,14 +137,10 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     const cliEffort = normalizeClaudeCliEffort(resolvedEffort, modelSelection.model);
     const ultracode = isClaudeUltracodeEffort(resolvedEffort);
     const thinkingDescriptor = findDescriptor("thinking");
-    const fastModeDescriptor = findDescriptor("fastMode");
     const thinking =
       thinkingDescriptor?.type === "boolean" ? thinkingDescriptor.currentValue : undefined;
-    const fastMode =
-      fastModeDescriptor?.type === "boolean" ? fastModeDescriptor.currentValue : undefined;
     const settings = {
       ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
-      ...(fastMode ? { fastMode: true } : {}),
       ...(ultracode ? { ultracode: true } : {}),
     };
     const settingsJson =
@@ -165,8 +161,11 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           "json",
           "--json-schema",
           jsonSchemaStr,
-          "--model",
-          resolveClaudeApiModelId(modelSelection),
+          // Reject a model id that re-enables the 1M context (a "[1m]" suffix): omit
+          // "--model" so the Claude CLI falls back to its own default rather than 1M.
+          ...(modelSlugEncodesForbiddenCapability(modelSelection.model)
+            ? []
+            : ["--model", modelSelection.model]),
           ...(cliEffort ? ["--effort", cliEffort] : []),
           ...(settingsJson ? ["--settings", settingsJson] : []),
           "--dangerously-skip-permissions",
