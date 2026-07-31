@@ -3,8 +3,10 @@ import type {
   OrchestrationProject,
   OrchestrationReadModel,
   OrchestrationThread,
+  OrchestrationTrigger,
   ProjectId,
   ThreadId,
+  TriggerId,
 } from "@t3tools/contracts";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as Effect from "effect/Effect";
@@ -68,6 +70,46 @@ export function requireProjectAbsent(input: {
     invariantError(
       input.command.type,
       `Project '${input.projectId}' already exists and cannot be created twice.`,
+    ),
+  );
+}
+
+export function findTriggerById(
+  readModel: OrchestrationReadModel,
+  triggerId: TriggerId,
+): OrchestrationTrigger | undefined {
+  return readModel.triggers.find((trigger) => trigger.id === triggerId);
+}
+
+export function requireTrigger(input: {
+  readonly readModel: OrchestrationReadModel;
+  readonly command: OrchestrationCommand;
+  readonly triggerId: TriggerId;
+}): Effect.Effect<OrchestrationTrigger, OrchestrationCommandInvariantError> {
+  const trigger = findTriggerById(input.readModel, input.triggerId);
+  if (trigger) {
+    return Effect.succeed(trigger);
+  }
+  return Effect.fail(
+    invariantError(
+      input.command.type,
+      `Trigger '${input.triggerId}' does not exist for command '${input.command.type}'.`,
+    ),
+  );
+}
+
+export function requireTriggerAbsent(input: {
+  readonly readModel: OrchestrationReadModel;
+  readonly command: OrchestrationCommand;
+  readonly triggerId: TriggerId;
+}): Effect.Effect<void, OrchestrationCommandInvariantError> {
+  if (!findTriggerById(input.readModel, input.triggerId)) {
+    return Effect.void;
+  }
+  return Effect.fail(
+    invariantError(
+      input.command.type,
+      `Trigger '${input.triggerId}' already exists and cannot be created twice.`,
     ),
   );
 }

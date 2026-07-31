@@ -48,6 +48,10 @@ import Migration0032 from "./Migrations/032_AuthPairingProofKeyThumbprint.ts";
 import Migration0033 from "./Migrations/033_ProjectionThreadsSettled.ts";
 import Migration0034 from "./Migrations/034_ProjectionThreadsSnoozed.ts";
 import Migration0035 from "./Migrations/035_ProjectionThreadTitleRegeneration.ts";
+import Migration0036 from "./Migrations/036_OrchestrationTriggerProjection.ts";
+import Migration0037 from "./Migrations/037_OrchestrationTriggerConditionTruth.ts";
+import Migration0038 from "./Migrations/038_ExternalEvents.ts";
+import Migration0039 from "./Migrations/039_OrchestrationTriggerComposite.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -95,6 +99,10 @@ export const migrationEntries = [
   [33, "ProjectionThreadsSettled", Migration0033],
   [34, "ProjectionThreadsSnoozed", Migration0034],
   [35, "ProjectionThreadTitleRegeneration", Migration0035],
+  [36, "OrchestrationTriggerProjection", Migration0036],
+  [37, "OrchestrationTriggerConditionTruth", Migration0037],
+  [38, "ExternalEvents", Migration0038],
+  [39, "OrchestrationTriggerComposite", Migration0039],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

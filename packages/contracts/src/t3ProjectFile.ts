@@ -80,6 +80,12 @@ export const T3ProjectFile = Schema.Struct({
       })
       .check(Schema.isMaxLength(T3_PROJECT_FILE_MAX_SCRIPTS)),
   ),
+  orchestrate: Schema.optionalKey(
+    Schema.Boolean.annotate({
+      description:
+        "When true, lets this project's agents drive other T3 Code sessions through the MCP orchestration control plane (start, resume, and inspect sessions of this same project). Defaults to false.",
+    }),
+  ),
 }).annotate({
   title: "T3 project file",
   description:

@@ -14,9 +14,11 @@ import {
   IsoDateTime,
   MessageId,
   NonNegativeInt,
+  PositiveInt,
   ProjectId,
   ProviderItemId,
   ThreadId,
+  TriggerId,
   TrimmedNonEmptyString,
   TurnId,
 } from "./baseSchemas.ts";
@@ -29,6 +31,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
+  subscribeTriggers: "orchestration.subscribeTriggers",
 } as const;
 
 export const ProviderApprovalPolicy = Schema.Literals([
@@ -221,6 +224,175 @@ export const OrchestrationProject = Schema.Struct({
 });
 export type OrchestrationProject = typeof OrchestrationProject.Type;
 
+/**
+ * `TriggerSchedule` — the temporal shape of a temporal trigger condition.
+ *
+ * Extensible union. V1 ships two variants:
+ * - `interval`: fire every `everyMs` milliseconds.
+ * - `at`: fire once at the absolute epoch-millisecond `timestamp` (one-shot).
+ *
+ * A `cron` variant is intentionally omitted in 2a: no cron parser exists in
+ * the repository dependency set, so a cron schedule could not be evaluated by
+ * the future scheduler without adding one.
+ */
+export const TriggerSchedule = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("interval"),
+    everyMs: PositiveInt,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("at"),
+    timestamp: NonNegativeInt,
+  }),
+]);
+export type TriggerSchedule = typeof TriggerSchedule.Type;
+
+/**
+ * `AtomRef` — a concrete, parameterized reference to an atom: a named
+ * observation about the world (e.g. "ref X is merged into base Y") that the
+ * server's atom domain registry knows how to validate and evaluate.
+ *
+ * An atom is identified by `(domain, type)` and carries its `params` frozen at
+ * trigger-creation time — the atom is concrete, never a template. `params` is a
+ * plain JSON object; each atom type owns its own param shape, validated by the
+ * registry when the condition is created.
+ */
+export const AtomRef = Schema.Struct({
+  domain: TrimmedNonEmptyString,
+  type: TrimmedNonEmptyString,
+  params: Schema.Record(Schema.String, Schema.Unknown),
+});
+export type AtomRef = typeof AtomRef.Type;
+
+/**
+ * `TriggerCondition` — what makes a trigger eligible to fire.
+ *
+ * Recursive, extensible discriminated union:
+ * - `temporal`: driven by a {@link TriggerSchedule} (evaluated by the
+ *   scheduler). Only valid at the top level — never as a composite leaf.
+ * - `atom`: driven by a concrete {@link AtomRef} (evaluated by the condition
+ *   evaluator — STATE atoms via polling; TRANSIENT atoms via webhooks/journal).
+ * - `and` / `or`: combine ≥2 sub-conditions (leaves are atoms; nesting of
+ *   and/or/not is allowed).
+ * - `not`: negate a single sub-condition. Validated at trigger creation to only
+ *   wrap a STATE atom (never a transient atom, never a composite).
+ *
+ * The recursion is expressed with {@link Schema.suspend} exactly as the
+ * keybinding-when AST — the hand-written {@link TriggerCondition} type carries
+ * the recursive shape the inferred type cannot.
+ */
+const TriggerConditionRef = Schema.suspend((): Schema.Codec<TriggerCondition> => TriggerCondition);
+export const TriggerCondition = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("temporal"),
+    schedule: TriggerSchedule,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("atom"),
+    atom: AtomRef,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("and"),
+    conditions: Schema.Array(TriggerConditionRef),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("or"),
+    conditions: Schema.Array(TriggerConditionRef),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("not"),
+    condition: TriggerConditionRef,
+  }),
+]);
+export type TriggerCondition =
+  | { readonly kind: "temporal"; readonly schedule: TriggerSchedule }
+  | { readonly kind: "atom"; readonly atom: AtomRef }
+  | { readonly kind: "and"; readonly conditions: ReadonlyArray<TriggerCondition> }
+  | { readonly kind: "or"; readonly conditions: ReadonlyArray<TriggerCondition> }
+  | { readonly kind: "not"; readonly condition: TriggerCondition };
+
+/**
+ * Worktree preparation for a trigger-started session. Derived from
+ * `StartSessionSpec.prepareWorktree` minus `projectCwd` (resolved server-side
+ * from the trigger's project when the session is launched in 2b).
+ */
+export const TriggerWorktreePreparation = Schema.Struct({
+  baseBranch: TrimmedNonEmptyString,
+  branch: Schema.optional(TrimmedNonEmptyString),
+  startFromOrigin: Schema.optional(Schema.Boolean),
+});
+export type TriggerWorktreePreparation = typeof TriggerWorktreePreparation.Type;
+
+/**
+ * `TriggerSessionSpec` — the session a `startSession` action launches. Mirrors
+ * `StartSessionSpec` minus `projectId` (owned by the trigger) and
+ * `interactionMode` (not surfaced to triggers in V1).
+ */
+export const TriggerSessionSpec = Schema.Struct({
+  title: Schema.optional(TrimmedNonEmptyString),
+  text: Schema.String,
+  modelSelection: Schema.optional(ModelSelection),
+  runtimeMode: Schema.optional(RuntimeMode),
+  prepareWorktree: Schema.optional(TriggerWorktreePreparation),
+  worktreePath: Schema.optional(TrimmedNonEmptyString),
+  runSetupScript: Schema.optional(Schema.Boolean),
+});
+export type TriggerSessionSpec = typeof TriggerSessionSpec.Type;
+
+/**
+ * `TriggerAction` — what a trigger does when it fires. Extensible union; V1
+ * ships a single `startSession` variant.
+ */
+export const TriggerAction = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("startSession"),
+    spec: TriggerSessionSpec,
+  }),
+]);
+export type TriggerAction = typeof TriggerAction.Type;
+
+/**
+ * `TriggerFireOutcome` — the terminal result of a fire, reported by the future
+ * scheduler through `trigger.fire-settled`. A transient failure is retryable;
+ * a permanent failure is not. Five consecutive transient failures auto-disable
+ * the trigger (decided in the decider).
+ */
+export const TriggerFireOutcome = Schema.Union([
+  Schema.Struct({
+    status: Schema.Literal("succeeded"),
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    status: Schema.Literal("failed"),
+    failureKind: Schema.Literals(["transient", "permanent"]),
+    reason: TrimmedNonEmptyString,
+  }),
+]);
+export type TriggerFireOutcome = typeof TriggerFireOutcome.Type;
+
+/**
+ * `OrchestrationTrigger` — the read-model shape of a trigger aggregate.
+ */
+export const OrchestrationTrigger = Schema.Struct({
+  id: TriggerId,
+  projectId: ProjectId,
+  name: TrimmedNonEmptyString,
+  condition: TriggerCondition,
+  action: TriggerAction,
+  enabled: Schema.Boolean,
+  // Count of consecutive transient failures. A success or a permanent failure
+  // resets it to 0; reaching 5 auto-disables the trigger.
+  consecutiveTransientFailures: NonNegativeInt,
+  lastFiredAt: Schema.NullOr(IsoDateTime),
+  lastOutcome: Schema.NullOr(TriggerFireOutcome),
+  // Anti-rebound window: the earliest time the trigger may fire again
+  // (last fire time + 60s). Consumed by the future scheduler.
+  nextEligibleAt: Schema.NullOr(IsoDateTime),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type OrchestrationTrigger = typeof OrchestrationTrigger.Type;
+
 export const OrchestrationMessageRole = Schema.Literals(["user", "assistant", "system"]);
 export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
 
@@ -389,6 +561,9 @@ export const OrchestrationReadModel = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projects: Schema.Array(OrchestrationProject),
   threads: Schema.Array(OrchestrationThread),
+  // Optional-with-default so read-model snapshots built without triggers (e.g.
+  // the shell/read snapshot) still decode; the command read model populates it.
+  triggers: Schema.Array(OrchestrationTrigger).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationReadModel = typeof OrchestrationReadModel.Type;
@@ -520,6 +695,26 @@ export const OrchestrationThreadDetailSnapshot = Schema.Struct({
   thread: OrchestrationThread,
 });
 export type OrchestrationThreadDetailSnapshot = typeof OrchestrationThreadDetailSnapshot.Type;
+
+/**
+ * Input for the project-scoped trigger subscription. Streams the project's
+ * triggers and re-emits the full list whenever any trigger event lands.
+ */
+export const OrchestrationSubscribeTriggersInput = Schema.Struct({
+  projectId: ProjectId,
+});
+export type OrchestrationSubscribeTriggersInput = typeof OrchestrationSubscribeTriggersInput.Type;
+
+/**
+ * Stream item for {@link OrchestrationSubscribeTriggersInput}. Each emission is
+ * a full snapshot of the project's triggers — the subscription re-sends the
+ * whole list rather than deltas, so the client just replaces its state with the
+ * latest emission.
+ */
+export const OrchestrationTriggersSnapshot = Schema.Struct({
+  triggers: Schema.Array(OrchestrationTrigger),
+});
+export type OrchestrationTriggersSnapshot = typeof OrchestrationTriggersSnapshot.Type;
 
 export const ProjectCreateCommand = Schema.Struct({
   type: Schema.Literal("project.create"),
@@ -761,10 +956,60 @@ const ThreadSessionStopCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const TriggerCreateCommand = Schema.Struct({
+  type: Schema.Literal("trigger.create"),
+  commandId: CommandId,
+  triggerId: TriggerId,
+  projectId: ProjectId,
+  name: TrimmedNonEmptyString,
+  condition: TriggerCondition,
+  action: TriggerAction,
+  enabled: Schema.optional(Schema.Boolean),
+  // Fixed window/delay for composite conditions (D20). `windowMs` bounds how
+  // long a partially-satisfied composite waits for completion; `delayMs` waits
+  // after full satisfaction before firing. Both optional and evaluator-only.
+  windowMs: Schema.optional(PositiveInt),
+  delayMs: Schema.optional(PositiveInt),
+});
+
+const TriggerUpdateCommand = Schema.Struct({
+  type: Schema.Literal("trigger.update"),
+  commandId: CommandId,
+  triggerId: TriggerId,
+  name: Schema.optional(TrimmedNonEmptyString),
+  condition: Schema.optional(TriggerCondition),
+  action: Schema.optional(TriggerAction),
+  windowMs: Schema.optional(PositiveInt),
+  delayMs: Schema.optional(PositiveInt),
+});
+
+const TriggerEnableCommand = Schema.Struct({
+  type: Schema.Literal("trigger.enable"),
+  commandId: CommandId,
+  triggerId: TriggerId,
+});
+
+const TriggerDisableCommand = Schema.Struct({
+  type: Schema.Literal("trigger.disable"),
+  commandId: CommandId,
+  triggerId: TriggerId,
+});
+
+const TriggerDeleteCommand = Schema.Struct({
+  type: Schema.Literal("trigger.delete"),
+  commandId: CommandId,
+  triggerId: TriggerId,
+});
+
 const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
   ProjectDeleteCommand,
+  TriggerCreateCommand,
+  TriggerUpdateCommand,
+  TriggerEnableCommand,
+  TriggerDisableCommand,
+  TriggerDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
   ThreadArchiveCommand,
@@ -790,6 +1035,11 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
   ProjectDeleteCommand,
+  TriggerCreateCommand,
+  TriggerUpdateCommand,
+  TriggerEnableCommand,
+  TriggerDisableCommand,
+  TriggerDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
   ThreadArchiveCommand,
@@ -883,8 +1133,25 @@ const ThreadTitleRegenerationCompleteCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
 });
 
+const TriggerFireStartedCommand = Schema.Struct({
+  type: Schema.Literal("trigger.fire-started"),
+  commandId: CommandId,
+  triggerId: TriggerId,
+  firedAt: IsoDateTime,
+});
+
+const TriggerFireSettledCommand = Schema.Struct({
+  type: Schema.Literal("trigger.fire-settled"),
+  commandId: CommandId,
+  triggerId: TriggerId,
+  firedAt: IsoDateTime,
+  outcome: TriggerFireOutcome,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
+  TriggerFireStartedCommand,
+  TriggerFireSettledCommand,
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
   ThreadProposedPlanUpsertCommand,
@@ -905,6 +1172,14 @@ export const OrchestrationEventType = Schema.Literals([
   "project.created",
   "project.meta-updated",
   "project.deleted",
+  "trigger.created",
+  "trigger.updated",
+  "trigger.enabled",
+  "trigger.disabled",
+  "trigger.deleted",
+  "trigger.fire-started",
+  "trigger.fire-settled",
+  "trigger.auto-disabled",
   "thread.created",
   "thread.deleted",
   "thread.archived",
@@ -931,7 +1206,7 @@ export const OrchestrationEventType = Schema.Literals([
 ]);
 export type OrchestrationEventType = typeof OrchestrationEventType.Type;
 
-export const OrchestrationAggregateKind = Schema.Literals(["project", "thread"]);
+export const OrchestrationAggregateKind = Schema.Literals(["project", "trigger", "thread"]);
 export type OrchestrationAggregateKind = typeof OrchestrationAggregateKind.Type;
 export const OrchestrationActorKind = Schema.Literals(["client", "server", "provider"]);
 
@@ -959,6 +1234,67 @@ export const ProjectMetaUpdatedPayload = Schema.Struct({
 export const ProjectDeletedPayload = Schema.Struct({
   projectId: ProjectId,
   deletedAt: IsoDateTime,
+});
+
+export const TriggerCreatedPayload = Schema.Struct({
+  triggerId: TriggerId,
+  projectId: ProjectId,
+  name: TrimmedNonEmptyString,
+  condition: TriggerCondition,
+  action: TriggerAction,
+  enabled: Schema.Boolean,
+  windowMs: Schema.optional(PositiveInt),
+  delayMs: Schema.optional(PositiveInt),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+
+export const TriggerUpdatedPayload = Schema.Struct({
+  triggerId: TriggerId,
+  name: Schema.optional(TrimmedNonEmptyString),
+  condition: Schema.optional(TriggerCondition),
+  action: Schema.optional(TriggerAction),
+  windowMs: Schema.optional(PositiveInt),
+  delayMs: Schema.optional(PositiveInt),
+  updatedAt: IsoDateTime,
+});
+
+export const TriggerEnabledPayload = Schema.Struct({
+  triggerId: TriggerId,
+  updatedAt: IsoDateTime,
+});
+
+export const TriggerDisabledPayload = Schema.Struct({
+  triggerId: TriggerId,
+  updatedAt: IsoDateTime,
+});
+
+export const TriggerDeletedPayload = Schema.Struct({
+  triggerId: TriggerId,
+  deletedAt: IsoDateTime,
+});
+
+export const TriggerFireStartedPayload = Schema.Struct({
+  triggerId: TriggerId,
+  firedAt: IsoDateTime,
+  nextEligibleAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+
+export const TriggerFireSettledPayload = Schema.Struct({
+  triggerId: TriggerId,
+  firedAt: IsoDateTime,
+  outcome: TriggerFireOutcome,
+  // The resulting consecutive-transient-failure counter after this outcome,
+  // computed by the decider so the projection stays in lock-step.
+  consecutiveTransientFailures: NonNegativeInt,
+  updatedAt: IsoDateTime,
+});
+
+export const TriggerAutoDisabledPayload = Schema.Struct({
+  triggerId: TriggerId,
+  reason: TrimmedNonEmptyString,
+  updatedAt: IsoDateTime,
 });
 
 export const ThreadCreatedPayload = Schema.Struct({
@@ -1151,7 +1487,7 @@ const EventBaseFields = {
   sequence: NonNegativeInt,
   eventId: EventId,
   aggregateKind: OrchestrationAggregateKind,
-  aggregateId: Schema.Union([ProjectId, ThreadId]),
+  aggregateId: Schema.Union([ProjectId, TriggerId, ThreadId]),
   occurredAt: IsoDateTime,
   commandId: Schema.NullOr(CommandId),
   causationEventId: Schema.NullOr(EventId),
@@ -1174,6 +1510,46 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("project.deleted"),
     payload: ProjectDeletedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("trigger.created"),
+    payload: TriggerCreatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("trigger.updated"),
+    payload: TriggerUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("trigger.enabled"),
+    payload: TriggerEnabledPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("trigger.disabled"),
+    payload: TriggerDisabledPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("trigger.deleted"),
+    payload: TriggerDeletedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("trigger.fire-started"),
+    payload: TriggerFireStartedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("trigger.fire-settled"),
+    payload: TriggerFireSettledPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("trigger.auto-disabled"),
+    payload: TriggerAutoDisabledPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
@@ -1418,6 +1794,10 @@ export const OrchestrationRpcSchemas = {
   subscribeShell: {
     input: OrchestrationSubscribeShellInput,
     output: OrchestrationShellStreamItem,
+  },
+  subscribeTriggers: {
+    input: OrchestrationSubscribeTriggersInput,
+    output: OrchestrationTriggersSnapshot,
   },
 } as const;
 

@@ -31,6 +31,11 @@ type CommandInput<T extends CommandType> = Omit<
 export type CreateProjectInput = CommandInput<"project.create">;
 export type UpdateProjectInput = CommandInput<"project.meta.update">;
 export type DeleteProjectInput = CommandInput<"project.delete">;
+export type CreateTriggerInput = CommandInput<"trigger.create">;
+export type UpdateTriggerInput = CommandInput<"trigger.update">;
+export type EnableTriggerInput = CommandInput<"trigger.enable">;
+export type DisableTriggerInput = CommandInput<"trigger.disable">;
+export type DeleteTriggerInput = CommandInput<"trigger.delete">;
 export type CreateThreadInput = CommandInput<"thread.create">;
 export type DeleteThreadInput = CommandInput<"thread.delete">;
 export type ArchiveThreadInput = CommandInput<"thread.archive">;
@@ -111,6 +116,56 @@ export const deleteProject: (input: DeleteProjectInput) => CommandEffect = Effec
   return yield* dispatch({
     ...input,
     type: "project.delete",
+    commandId: yield* commandId(input),
+  });
+});
+
+export const createTrigger: (input: CreateTriggerInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.createTrigger",
+)(function* (input) {
+  return yield* dispatch({
+    ...input,
+    type: "trigger.create",
+    commandId: yield* commandId(input),
+  });
+});
+
+export const updateTrigger: (input: UpdateTriggerInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.updateTrigger",
+)(function* (input) {
+  return yield* dispatch({
+    ...input,
+    type: "trigger.update",
+    commandId: yield* commandId(input),
+  });
+});
+
+export const enableTrigger: (input: EnableTriggerInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.enableTrigger",
+)(function* (input) {
+  return yield* dispatch({
+    ...input,
+    type: "trigger.enable",
+    commandId: yield* commandId(input),
+  });
+});
+
+export const disableTrigger: (input: DisableTriggerInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.disableTrigger",
+)(function* (input) {
+  return yield* dispatch({
+    ...input,
+    type: "trigger.disable",
+    commandId: yield* commandId(input),
+  });
+});
+
+export const deleteTrigger: (input: DeleteTriggerInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.deleteTrigger",
+)(function* (input) {
+  return yield* dispatch({
+    ...input,
+    type: "trigger.delete",
     commandId: yield* commandId(input),
   });
 });

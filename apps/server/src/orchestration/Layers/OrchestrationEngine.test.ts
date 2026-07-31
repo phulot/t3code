@@ -114,6 +114,7 @@ describe("OrchestrationEngine", () => {
     const projectionSnapshot = {
       snapshotSequence: 7,
       updatedAt: "2026-03-03T00:00:04.000Z",
+      triggers: [],
       projects: [
         {
           id: asProjectId("project-bootstrap"),
@@ -203,6 +204,7 @@ describe("OrchestrationEngine", () => {
           getThreadShellById: () => Effect.succeed(Option.none()),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+          getTriggersForProject: () => Effect.succeed([]),
         }),
       ),
       Layer.provide(

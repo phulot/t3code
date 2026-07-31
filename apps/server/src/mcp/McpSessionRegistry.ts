@@ -4,10 +4,14 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import { HttpServer } from "effect/unstable/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
+import { ProjectionThreadRepository } from "../persistence/Services/ProjectionThreads.ts";
+import { T3ProjectFileLoader } from "../project/T3ProjectFileLoader.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpProviderSession from "./McpProviderSession.ts";
 
@@ -95,6 +99,9 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const environmentId = yield* environment.getEnvironmentId;
   const httpServer = yield* HttpServer.HttpServer;
+  const threads = yield* ProjectionThreadRepository;
+  const projects = yield* ProjectionProjectRepository;
+  const projectFileLoader = yield* T3ProjectFileLoader;
   const state = yield* SynchronizedRef.make<RegistryState>({ records: new Map() });
   const currentTimeMillis = options.now ? Effect.sync(options.now) : Clock.currentTimeMillis;
   const livenessWindowMs = options.livenessWindowMs ?? DEFAULT_LIVENESS_WINDOW_MS;
@@ -117,18 +124,52 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     return next.size === records.size ? records : next;
   };
 
+  /**
+   * Resolve the capability set granted to a thread's credential. `"preview"`
+   * is always granted; `"orchestrate"` is added only when the thread's project
+   * has opted in via `orchestrate: true` in its checked-in `t3.json`.
+   *
+   * The opt-in resolution is strictly best-effort: a missing thread, missing
+   * project, missing/unreadable `t3.json`, or any repository error simply omits
+   * `"orchestrate"` and never fails `issue`.
+   */
+  const resolveCapabilities = Effect.fn("McpSessionRegistry.resolveCapabilities")(function* (
+    threadId: ThreadId,
+  ) {
+    const capabilities = new Set<McpInvocationContext.McpCapability>(["preview"]);
+    const optedIn = yield* Effect.gen(function* () {
+      const thread = yield* threads.getById({ threadId });
+      if (Option.isNone(thread)) return false;
+      const project = yield* projects.getById({ projectId: thread.value.projectId });
+      if (Option.isNone(project)) return false;
+      const projectFile = yield* projectFileLoader.load(project.value.workspaceRoot);
+      return Option.isSome(projectFile) && projectFile.value.orchestrate === true;
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("failed to resolve MCP orchestrate opt-in; defaulting to disabled", {
+          threadId,
+          error,
+        }).pipe(Effect.as(false)),
+      ),
+    );
+    if (optedIn) capabilities.add("orchestrate");
+    return capabilities;
+  });
+
   const issue: McpSessionRegistryShape["issue"] = Effect.fn("McpSessionRegistry.issue")(
     function* (request) {
       const issuedAt = yield* currentTimeMillis;
       const providerSessionId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
       const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
       const tokenHash = yield* hashToken(rawToken);
+      const threadId = ThreadId.make(request.threadId);
+      const capabilities = yield* resolveCapabilities(threadId);
       const scope: McpInvocationContext.McpInvocationScope = {
         environmentId,
-        threadId: ThreadId.make(request.threadId),
+        threadId,
         providerSessionId,
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
-        capabilities: new Set(["preview"]),
+        capabilities,
         issuedAt,
       };
       yield* SynchronizedRef.update(state, ({ records }) => {

@@ -2,6 +2,14 @@ import {
   ProjectCreatedPayload as ContractsProjectCreatedPayloadSchema,
   ProjectMetaUpdatedPayload as ContractsProjectMetaUpdatedPayloadSchema,
   ProjectDeletedPayload as ContractsProjectDeletedPayloadSchema,
+  TriggerCreatedPayload as ContractsTriggerCreatedPayloadSchema,
+  TriggerUpdatedPayload as ContractsTriggerUpdatedPayloadSchema,
+  TriggerEnabledPayload as ContractsTriggerEnabledPayloadSchema,
+  TriggerDisabledPayload as ContractsTriggerDisabledPayloadSchema,
+  TriggerDeletedPayload as ContractsTriggerDeletedPayloadSchema,
+  TriggerFireStartedPayload as ContractsTriggerFireStartedPayloadSchema,
+  TriggerFireSettledPayload as ContractsTriggerFireSettledPayloadSchema,
+  TriggerAutoDisabledPayload as ContractsTriggerAutoDisabledPayloadSchema,
   ThreadCreatedPayload as ContractsThreadCreatedPayloadSchema,
   ThreadArchivedPayload as ContractsThreadArchivedPayloadSchema,
   ThreadSettledPayload as ContractsThreadSettledPayloadSchema,
@@ -30,6 +38,15 @@ import {
 export const ProjectCreatedPayload = ContractsProjectCreatedPayloadSchema;
 export const ProjectMetaUpdatedPayload = ContractsProjectMetaUpdatedPayloadSchema;
 export const ProjectDeletedPayload = ContractsProjectDeletedPayloadSchema;
+
+export const TriggerCreatedPayload = ContractsTriggerCreatedPayloadSchema;
+export const TriggerUpdatedPayload = ContractsTriggerUpdatedPayloadSchema;
+export const TriggerEnabledPayload = ContractsTriggerEnabledPayloadSchema;
+export const TriggerDisabledPayload = ContractsTriggerDisabledPayloadSchema;
+export const TriggerDeletedPayload = ContractsTriggerDeletedPayloadSchema;
+export const TriggerFireStartedPayload = ContractsTriggerFireStartedPayloadSchema;
+export const TriggerFireSettledPayload = ContractsTriggerFireSettledPayloadSchema;
+export const TriggerAutoDisabledPayload = ContractsTriggerAutoDisabledPayloadSchema;
 
 export const ThreadCreatedPayload = ContractsThreadCreatedPayloadSchema;
 export const ThreadArchivedPayload = ContractsThreadArchivedPayloadSchema;

@@ -111,6 +111,10 @@
       "types": "./src/state/shell.ts",
       "default": "./src/state/shell.ts"
     },
+    "./state/triggers": {
+      "types": "./src/state/triggers.ts",
+      "default": "./src/state/triggers.ts"
+    },
     "./state/source-control": {
       "types": "./src/state/sourceControl.ts",
       "default": "./src/state/sourceControl.ts"

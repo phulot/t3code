@@ -16,6 +16,7 @@ import type {
   OrchestrationThread,
   OrchestrationThreadDetailSnapshot,
   OrchestrationThreadShell,
+  OrchestrationTrigger,
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -168,6 +169,17 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadDetailSnapshot: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThreadDetailSnapshot>, ProjectionRepositoryError>;
+
+  /**
+   * List the triggers of a project as read-model rows, ordered by creation.
+   *
+   * Backs the project-scoped trigger subscription: the ws handler calls this to
+   * build the initial snapshot and to re-read the full list on every trigger
+   * event.
+   */
+  readonly getTriggersForProject: (
+    projectId: ProjectId,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationTrigger>, ProjectionRepositoryError>;
 }
 
 /**

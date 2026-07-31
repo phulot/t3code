@@ -1,10 +1,27 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  ProviderInstanceId,
+  type T3ProjectFile,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import { HttpServer } from "effect/unstable/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import {
+  ProjectionProjectRepository,
+  type ProjectionProject,
+} from "../persistence/Services/ProjectionProjects.ts";
+import {
+  ProjectionThreadRepository,
+  type ProjectionThread,
+} from "../persistence/Services/ProjectionThreads.ts";
+import { T3ProjectFileLoader } from "../project/T3ProjectFileLoader.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 
 const environmentId = EnvironmentId.make("environment-1");
@@ -19,7 +36,43 @@ const fakeEnvironment = ServerEnvironment.ServerEnvironment.of({
   getDescriptor: Effect.die("unused"),
 });
 
-const makeRegistry = (now: () => number, httpServer = fakeHttpServer) =>
+interface OptInStubs {
+  readonly thread?: Option.Option<Pick<ProjectionThread, "projectId">>;
+  readonly project?: Option.Option<Pick<ProjectionProject, "workspaceRoot">>;
+  readonly projectFile?: Option.Option<T3ProjectFile>;
+}
+
+const optInLayer = (stubs: OptInStubs = {}) =>
+  Layer.mergeAll(
+    Layer.succeed(
+      ProjectionThreadRepository,
+      ProjectionThreadRepository.of({
+        upsert: () => Effect.void,
+        getById: () =>
+          Effect.succeed((stubs.thread ?? Option.none()) as Option.Option<ProjectionThread>),
+        listByProjectId: () => Effect.succeed([]),
+        deleteById: () => Effect.void,
+      }),
+    ),
+    Layer.succeed(
+      ProjectionProjectRepository,
+      ProjectionProjectRepository.of({
+        upsert: () => Effect.void,
+        getById: () =>
+          Effect.succeed((stubs.project ?? Option.none()) as Option.Option<ProjectionProject>),
+        listAll: () => Effect.succeed([]),
+        deleteById: () => Effect.void,
+      }),
+    ),
+    Layer.succeed(
+      T3ProjectFileLoader,
+      T3ProjectFileLoader.of({
+        load: () => Effect.succeed(stubs.projectFile ?? Option.none()),
+      }),
+    ),
+  );
+
+const makeRegistry = (now: () => number, httpServer = fakeHttpServer, stubs: OptInStubs = {}) =>
   McpSessionRegistry.__testing
     .make({
       now,
@@ -28,7 +81,7 @@ const makeRegistry = (now: () => number, httpServer = fakeHttpServer) =>
     .pipe(
       Effect.provideService(HttpServer.HttpServer, httpServer),
       Effect.provideService(ServerEnvironment.ServerEnvironment, fakeEnvironment),
-      Effect.provide(NodeServices.layer),
+      Effect.provide(Layer.merge(optInLayer(stubs), NodeServices.layer)),
     );
 
 it.effect("stores only a token hash, resolves the bearer token, and revokes by thread", () =>
@@ -125,5 +178,65 @@ it.effect("does not keep credentials of other threads alive", () =>
     timestamp += 2;
 
     expect(yield* registry.resolve(token)).toBeUndefined();
+  }),
+);
+
+const projectFile = (orchestrate?: boolean): T3ProjectFile =>
+  (orchestrate === undefined ? {} : { orchestrate }) as T3ProjectFile;
+
+const issueAndResolveCapabilities = (stubs: OptInStubs) =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000, fakeHttpServer, stubs);
+    const issued = yield* registry.issue({
+      threadId: ThreadId.make("thread-optin"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const resolved = yield* registry.resolve(token);
+    return resolved?.capabilities;
+  });
+
+it.effect("grants orchestrate when the project's t3.json opts in", () =>
+  Effect.gen(function* () {
+    const capabilities = yield* issueAndResolveCapabilities({
+      thread: Option.some({ projectId: ProjectId.make("project-1") }),
+      project: Option.some({ workspaceRoot: "/tmp/project-1" }),
+      projectFile: Option.some(projectFile(true)),
+    });
+    expect(capabilities?.has("preview")).toBe(true);
+    expect(capabilities?.has("orchestrate")).toBe(true);
+  }),
+);
+
+it.effect("does not grant orchestrate when t3.json omits or disables the opt-in", () =>
+  Effect.gen(function* () {
+    const disabled = yield* issueAndResolveCapabilities({
+      thread: Option.some({ projectId: ProjectId.make("project-1") }),
+      project: Option.some({ workspaceRoot: "/tmp/project-1" }),
+      projectFile: Option.some(projectFile(false)),
+    });
+    expect(disabled?.has("preview")).toBe(true);
+    expect(disabled?.has("orchestrate")).toBe(false);
+
+    const absent = yield* issueAndResolveCapabilities({
+      thread: Option.some({ projectId: ProjectId.make("project-1") }),
+      project: Option.some({ workspaceRoot: "/tmp/project-1" }),
+      projectFile: Option.none(),
+    });
+    expect(absent?.has("orchestrate")).toBe(false);
+  }),
+);
+
+it.effect("tolerates a missing thread or project and grants only preview", () =>
+  Effect.gen(function* () {
+    const noThread = yield* issueAndResolveCapabilities({ thread: Option.none() });
+    expect(noThread?.has("preview")).toBe(true);
+    expect(noThread?.has("orchestrate")).toBe(false);
+
+    const noProject = yield* issueAndResolveCapabilities({
+      thread: Option.some({ projectId: ProjectId.make("project-1") }),
+      project: Option.none(),
+    });
+    expect(noProject?.has("orchestrate")).toBe(false);
   }),
 );

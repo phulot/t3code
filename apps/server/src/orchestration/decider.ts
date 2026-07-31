@@ -7,6 +7,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import type * as PlatformError from "effect/PlatformError";
 
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
@@ -19,10 +20,21 @@ import {
   requireThreadArchived,
   requireThreadAbsent,
   requireThreadNotArchived,
+  requireTrigger,
+  requireTriggerAbsent,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+
+// Number of consecutive transient fire failures that auto-disables a trigger
+// (Decision D11). A success or a permanent failure resets the counter.
+const TRIGGER_AUTO_DISABLE_THRESHOLD = 5;
+
+// Anti-rebound window: after a fire starts, the trigger may not fire again for
+// this long. `nextEligibleAt` = fire time + this window; consumed by the future
+// scheduler (2b).
+const TRIGGER_ANTI_REBOUND_MS = 60 * 1_000;
 
 // Session adoption takes seconds; a user message still unadopted after this
 // window is a failed/stale start, not pending work. Mirrors the client's
@@ -342,6 +354,221 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           deletedAt: occurredAt,
         },
       };
+    }
+
+    case "trigger.create": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      yield* requireTriggerAbsent({
+        readModel,
+        command,
+        triggerId: command.triggerId,
+      });
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "trigger",
+          aggregateId: command.triggerId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "trigger.created",
+        payload: {
+          triggerId: command.triggerId,
+          projectId: command.projectId,
+          name: command.name,
+          condition: command.condition,
+          action: command.action,
+          enabled: command.enabled ?? true,
+          ...(command.windowMs !== undefined ? { windowMs: command.windowMs } : {}),
+          ...(command.delayMs !== undefined ? { delayMs: command.delayMs } : {}),
+          createdAt: occurredAt,
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "trigger.update": {
+      yield* requireTrigger({
+        readModel,
+        command,
+        triggerId: command.triggerId,
+      });
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "trigger",
+          aggregateId: command.triggerId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "trigger.updated",
+        payload: {
+          triggerId: command.triggerId,
+          ...(command.name !== undefined ? { name: command.name } : {}),
+          ...(command.condition !== undefined ? { condition: command.condition } : {}),
+          ...(command.action !== undefined ? { action: command.action } : {}),
+          ...(command.windowMs !== undefined ? { windowMs: command.windowMs } : {}),
+          ...(command.delayMs !== undefined ? { delayMs: command.delayMs } : {}),
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "trigger.enable": {
+      yield* requireTrigger({
+        readModel,
+        command,
+        triggerId: command.triggerId,
+      });
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "trigger",
+          aggregateId: command.triggerId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "trigger.enabled",
+        payload: {
+          triggerId: command.triggerId,
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "trigger.disable": {
+      yield* requireTrigger({
+        readModel,
+        command,
+        triggerId: command.triggerId,
+      });
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "trigger",
+          aggregateId: command.triggerId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "trigger.disabled",
+        payload: {
+          triggerId: command.triggerId,
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "trigger.delete": {
+      yield* requireTrigger({
+        readModel,
+        command,
+        triggerId: command.triggerId,
+      });
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "trigger",
+          aggregateId: command.triggerId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "trigger.deleted",
+        payload: {
+          triggerId: command.triggerId,
+          deletedAt: occurredAt,
+        },
+      };
+    }
+
+    case "trigger.fire-started": {
+      yield* requireTrigger({
+        readModel,
+        command,
+        triggerId: command.triggerId,
+      });
+      const occurredAt = yield* nowIso;
+      // Anti-rebound: nextEligibleAt = firedAt + window. Falls back to the fire
+      // time itself if firedAt is somehow unparseable (defensive; firedAt is a
+      // server-produced IsoDateTime).
+      const nextEligibleAt = Option.match(DateTime.make(command.firedAt), {
+        onNone: () => command.firedAt,
+        onSome: (firedAtDateTime) =>
+          DateTime.formatIso(
+            DateTime.add(firedAtDateTime, { milliseconds: TRIGGER_ANTI_REBOUND_MS }),
+          ),
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "trigger",
+          aggregateId: command.triggerId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "trigger.fire-started",
+        payload: {
+          triggerId: command.triggerId,
+          firedAt: command.firedAt,
+          nextEligibleAt,
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "trigger.fire-settled": {
+      const trigger = yield* requireTrigger({
+        readModel,
+        command,
+        triggerId: command.triggerId,
+      });
+      const occurredAt = yield* nowIso;
+      // Auto-disable accounting (Decision D11): only a transient failure
+      // increments the streak; a success or a permanent failure resets it.
+      const isTransientFailure =
+        command.outcome.status === "failed" && command.outcome.failureKind === "transient";
+      const nextConsecutiveTransientFailures = isTransientFailure
+        ? trigger.consecutiveTransientFailures + 1
+        : 0;
+      const settledEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "trigger",
+          aggregateId: command.triggerId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "trigger.fire-settled",
+        payload: {
+          triggerId: command.triggerId,
+          firedAt: command.firedAt,
+          outcome: command.outcome,
+          consecutiveTransientFailures: nextConsecutiveTransientFailures,
+          updatedAt: occurredAt,
+        },
+      };
+      // Reaching the threshold while still enabled auto-disables the trigger.
+      const shouldAutoDisable =
+        trigger.enabled && nextConsecutiveTransientFailures >= TRIGGER_AUTO_DISABLE_THRESHOLD;
+      if (!shouldAutoDisable) {
+        return settledEvent;
+      }
+      const autoDisabledEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "trigger",
+          aggregateId: command.triggerId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "trigger.auto-disabled",
+        payload: {
+          triggerId: command.triggerId,
+          reason: `${TRIGGER_AUTO_DISABLE_THRESHOLD} consecutive transient failures`,
+          updatedAt: occurredAt,
+        },
+      };
+      return [settledEvent, autoDisabledEvent];
     }
 
     case "thread.create": {

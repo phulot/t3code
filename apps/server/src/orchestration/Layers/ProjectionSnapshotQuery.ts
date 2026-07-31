@@ -11,6 +11,9 @@ import {
   OrchestrationThread,
   OrchestrationThreadDetailSnapshot,
   ProjectScript,
+  TriggerAction,
+  TriggerCondition,
+  TriggerFireOutcome,
   TurnId,
   type OrchestrationCheckpointSummary,
   type OrchestrationLatestTurn,
@@ -18,6 +21,7 @@ import {
   type OrchestrationProjectShell,
   type OrchestrationProposedPlan,
   type OrchestrationProject,
+  type OrchestrationTrigger,
   type OrchestrationSession,
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
@@ -43,6 +47,7 @@ import {
 } from "../../persistence/Errors.ts";
 import { ProjectionCheckpoint } from "../../persistence/Services/ProjectionCheckpoints.ts";
 import { ProjectionProject } from "../../persistence/Services/ProjectionProjects.ts";
+import { ProjectionTrigger } from "../../persistence/Services/ProjectionTriggers.ts";
 import { ProjectionState } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessage } from "../../persistence/Services/ProjectionThreadMessages.ts";
@@ -66,6 +71,14 @@ const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   Struct.assign({
     defaultModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
     scripts: Schema.fromJsonString(Schema.Array(ProjectScript)),
+  }),
+);
+const ProjectionTriggerDbRowSchema = ProjectionTrigger.mapFields(
+  Struct.assign({
+    enabled: Schema.Number,
+    condition: Schema.fromJsonString(TriggerCondition),
+    action: Schema.fromJsonString(TriggerAction),
+    lastOutcome: Schema.NullOr(Schema.fromJsonString(TriggerFireOutcome)),
   }),
 );
 const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
@@ -322,6 +335,53 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           deleted_at AS "deletedAt"
         FROM projection_projects
         ORDER BY created_at ASC, project_id ASC
+      `,
+  });
+
+  const listTriggerRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionTriggerDbRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          trigger_id AS "triggerId",
+          project_id AS "projectId",
+          name,
+          condition_json AS "condition",
+          action_json AS "action",
+          enabled,
+          consecutive_transient_failures AS "consecutiveTransientFailures",
+          last_fired_at AS "lastFiredAt",
+          last_outcome_json AS "lastOutcome",
+          next_eligible_at AS "nextEligibleAt",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+        FROM projection_triggers
+        ORDER BY created_at ASC, trigger_id ASC
+      `,
+  });
+
+  const listTriggerRowsByProject = SqlSchema.findAll({
+    Request: ProjectIdLookupInput,
+    Result: ProjectionTriggerDbRowSchema,
+    execute: ({ projectId }) =>
+      sql`
+        SELECT
+          trigger_id AS "triggerId",
+          project_id AS "projectId",
+          name,
+          condition_json AS "condition",
+          action_json AS "action",
+          enabled,
+          consecutive_transient_failures AS "consecutiveTransientFailures",
+          last_fired_at AS "lastFiredAt",
+          last_outcome_json AS "lastOutcome",
+          next_eligible_at AS "nextEligibleAt",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+        FROM projection_triggers
+        WHERE project_id = ${projectId}
+        ORDER BY created_at ASC, trigger_id ASC
       `,
   });
 
@@ -1266,6 +1326,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
             ),
           ),
+          listTriggerRows(undefined).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getCommandReadModel:listTriggers:query",
+                "ProjectionSnapshotQuery.getCommandReadModel:listTriggers:decodeRows",
+              ),
+            ),
+          ),
           listThreadRows(undefined).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
@@ -1310,10 +1378,19 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       )
       .pipe(
         Effect.flatMap(
-          ([projectRows, threadRows, proposedPlanRows, sessionRows, latestTurnRows, stateRows]) =>
+          ([
+            projectRows,
+            triggerRows,
+            threadRows,
+            proposedPlanRows,
+            sessionRows,
+            latestTurnRows,
+            stateRows,
+          ]) =>
             Effect.sync(() => {
               let updatedAt: string | null = null;
               const projects: OrchestrationProject[] = [];
+              const triggers: OrchestrationTrigger[] = [];
               const threads: OrchestrationThread[] = [];
 
               for (let index = 0; index < projectRows.length; index += 1) {
@@ -1331,6 +1408,27 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
                   deletedAt: row.deletedAt,
+                });
+              }
+              for (let index = 0; index < triggerRows.length; index += 1) {
+                const row = triggerRows[index];
+                if (!row) {
+                  continue;
+                }
+                updatedAt = maxIso(updatedAt, row.updatedAt);
+                triggers.push({
+                  id: row.triggerId,
+                  projectId: row.projectId,
+                  name: row.name,
+                  condition: row.condition,
+                  action: row.action,
+                  enabled: row.enabled === 1,
+                  consecutiveTransientFailures: row.consecutiveTransientFailures,
+                  lastFiredAt: row.lastFiredAt,
+                  lastOutcome: row.lastOutcome,
+                  nextEligibleAt: row.nextEligibleAt,
+                  createdAt: row.createdAt,
+                  updatedAt: row.updatedAt,
                 });
               }
               for (let index = 0; index < threadRows.length; index += 1) {
@@ -1439,6 +1537,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               return {
                 snapshotSequence: computeSnapshotSequence(stateRows),
                 projects,
+                triggers,
                 threads,
                 updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
               } satisfies OrchestrationReadModel;
@@ -2126,6 +2225,39 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       );
 
+  const getTriggersForProject: ProjectionSnapshotQueryShape["getTriggersForProject"] = (
+    projectId,
+  ) =>
+    listTriggerRowsByProject({ projectId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getTriggersForProject:listTriggers:query",
+          "ProjectionSnapshotQuery.getTriggersForProject:listTriggers:decodeRows",
+        ),
+      ),
+      Effect.map((rows) =>
+        rows.reduce<Array<OrchestrationTrigger>>((triggers, row) => {
+          if (row) {
+            triggers.push({
+              id: row.triggerId,
+              projectId: row.projectId,
+              name: row.name,
+              condition: row.condition,
+              action: row.action,
+              enabled: row.enabled === 1,
+              consecutiveTransientFailures: row.consecutiveTransientFailures,
+              lastFiredAt: row.lastFiredAt,
+              lastOutcome: row.lastOutcome,
+              nextEligibleAt: row.nextEligibleAt,
+              createdAt: row.createdAt,
+              updatedAt: row.updatedAt,
+            });
+          }
+          return triggers;
+        }, []),
+      ),
+    );
+
   return {
     getCommandReadModel,
     getSnapshot,
@@ -2141,6 +2273,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getThreadShellById,
     getThreadDetailById,
     getThreadDetailSnapshot,
+    getTriggersForProject,
   } satisfies ProjectionSnapshotQueryShape;
 });
 
