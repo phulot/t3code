@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+#
+# run — démarre l'app dev en la synchronisant sur l'espace de travail de la
+# vraie app installée, puis affiche l'URL de pairing.
+#
+#   - copie ~/.t3/userdata (données de la vraie app) -> ~/.t3/dev (home du dev)
+#   - lance `pnpm dev` avec node 24 (requis par le projet)
+#   - attend et imprime l'URL de pairing (usage unique)
+#
+# Le serveur reste vivant en arrière-plan. Log complet : /tmp/t3-dev.log
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT"
+
+SRC="$HOME/.t3/userdata"   # home de la vraie app (prod)
+DST="$HOME/.t3/dev"        # home du serveur dev
+LOG="/tmp/t3-dev.log"
+
+# --- node 24 (le projet exige node ^24.13.1) --------------------------------
+NODE24_BIN="$(ls -d "$HOME"/.nvm/versions/node/v24.* 2>/dev/null | sort -V | tail -1)/bin"
+if [ -x "$NODE24_BIN/node" ]; then
+  export PATH="$NODE24_BIN:$PATH"
+fi
+case "$(node --version 2>/dev/null)" in
+  v24.*|v25.*) ;;
+  *) echo "✗ node 24 introuvable (trouvé: $(node --version 2>/dev/null || echo aucun))"; exit 1 ;;
+esac
+
+# --- arrête tout serveur dev déjà lancé (parent + enfants) ------------------
+# dev-runner spawne vite (vp dev) et le serveur (src/bin.ts) : tuer le seul
+# parent laisserait les ports occupés, d'où un glissement 5733 -> 5734.
+echo "→ arrêt de l'ancienne instance dev"
+for pat in "scripts/dev-runner.ts" "vite-plus/bin/vp run" "vite/node/cli.js dev" "node --watch src/bin.ts" "node src/bin.ts"; do
+  pkill -f "$pat" 2>/dev/null || true
+done
+# attend que les ports du dev se libèrent (max ~10s), sinon SIGKILL
+for _ in $(seq 1 10); do
+  if ! lsof -nP -iTCP:13773 -sTCP:LISTEN >/dev/null 2>&1 \
+     && ! lsof -nP -iTCP:5733 -sTCP:LISTEN >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+for pat in "scripts/dev-runner.ts" "vite/node/cli.js dev" "src/bin.ts"; do
+  pkill -9 -f "$pat" 2>/dev/null || true
+done
+sleep 1
+
+# --- synchronise le workspace dev sur la vraie app --------------------------
+if [ ! -d "$SRC" ]; then
+  echo "✗ dossier de la vraie app absent: $SRC"; exit 1
+fi
+echo "→ synchronisation $SRC → $DST"
+mkdir -p "$DST"
+rsync -a \
+  --exclude 'logs/' \
+  --exclude 'server-runtime.json' \
+  "$SRC"/ "$DST"/
+
+# --- lance le dev en arrière-plan -------------------------------------------
+echo "→ démarrage du serveur dev (log: $LOG)"
+: > "$LOG"
+nohup pnpm dev >>"$LOG" 2>&1 &
+DEV_PID=$!
+
+# --- attend l'URL de pairing ------------------------------------------------
+echo "→ attente de l'URL de pairing…"
+for _ in $(seq 1 60); do
+  if ! kill -0 "$DEV_PID" 2>/dev/null; then
+    echo "✗ le serveur dev s'est arrêté. Voir $LOG"; tail -20 "$LOG"; exit 1
+  fi
+  URL="$(grep -oE 'http://localhost:[0-9]+/pair#token=[A-Za-z0-9]+' "$LOG" | tail -1 || true)"
+  if [ -n "$URL" ]; then
+    WEB="$(grep -oE 'Local:[[:space:]]+http://localhost:[0-9]+' "$LOG" | tail -1 | grep -oE 'http://localhost:[0-9]+' || true)"
+    echo
+    echo "✓ app dev démarrée (pid $DEV_PID)"
+    [ -n "$WEB" ] && echo "  web   : $WEB/"
+    echo "  pair  : $URL"
+    echo
+    echo "  (token à usage unique — relance ce script pour en obtenir un nouveau)"
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "✗ pas d'URL de pairing après 60s. Voir $LOG"; tail -20 "$LOG"; exit 1
