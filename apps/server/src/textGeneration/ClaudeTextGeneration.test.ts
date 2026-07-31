@@ -222,7 +222,7 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
     ),
   );
 
-  it.effect("forwards Claude fast mode and supported effort", () =>
+  it.effect("forwards supported effort", () =>
     withFakeClaudeEnv(
       {
         output: JSON.stringify({
@@ -231,7 +231,7 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
             body: "Body",
           },
         }),
-        argsMustContain: '--effort max --settings {"fastMode":true}',
+        argsMustContain: "--effort max",
       },
       (textGeneration) =>
         Effect.gen(function* () {
@@ -245,7 +245,6 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
             modelSelection: {
               ...createModelSelection(ProviderInstanceId.make("claudeAgent"), "claude-opus-4-6", [
                 { id: "effort", value: "max" },
-                { id: "fastMode", value: true },
               ]),
             },
           });

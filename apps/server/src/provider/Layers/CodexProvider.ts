@@ -123,14 +123,21 @@ export function mapCodexModelCapabilities(
         },
   );
   const defaultReasoning = reasoningOptions.find((option) => option.isDefault)?.id;
-  const serviceTiers =
+  const serviceTiers = (
     model.serviceTiers && model.serviceTiers.length > 0
       ? model.serviceTiers
       : (model.additionalSpeedTiers ?? []).map((id) => ({
           id,
           name: id === "fast" ? "Fast" : id,
           description: "",
-        }));
+        }))
+  ).filter((tier) => {
+    // The fast tier is forbidden and must never be offered as a selectable option.
+    // Key on the stable id ("fast" legacy, "priority" real catalog id) rather than
+    // only the display name, which can vary ("Fast", "Priority", "Fast (1.5x)").
+    const tierId = tier.id.toLowerCase();
+    return tierId !== "fast" && tierId !== "priority" && tier.name.toLowerCase() !== "fast";
+  });
   const catalogDefaultServiceTier = serviceTiers.some(
     (tier) => tier.id === model.defaultServiceTier,
   )

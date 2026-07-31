@@ -16,7 +16,6 @@ import {
 } from "@t3tools/shared/model";
 import { memo, useCallback, useState } from "react";
 import type { VariantProps } from "class-variance-authority";
-import { ZapIcon } from "lucide-react";
 import { buttonVariants } from "../ui/button";
 import {
   Menu,
@@ -31,7 +30,7 @@ import { useComposerDraftStore, DraftId } from "../../composerDraftStore";
 import { getProviderModelCapabilities } from "../../providerModels";
 import { cn } from "~/lib/utils";
 import { Badge } from "../ui/badge";
-import { ComposerControl, ComposerControlChevron, ComposerControlIcon } from "./ComposerControl";
+import { ComposerControl, ComposerControlChevron } from "./ComposerControl";
 
 type ProviderOptions = ReadonlyArray<ProviderOptionSelection>;
 
@@ -111,11 +110,7 @@ function getSelectedTraits(
       descriptor.type === "boolean",
   );
   const primarySelectDescriptor = selectDescriptors[0] ?? null;
-  const contextWindowDescriptor =
-    selectDescriptors.find((descriptor) => descriptor.id === "contextWindow") ?? null;
   const agentDescriptor = selectDescriptors.find((descriptor) => descriptor.id === "agent") ?? null;
-  const fastModeDescriptor =
-    booleanDescriptors.find((descriptor) => descriptor.id === "fastMode") ?? null;
   const thinkingDescriptor =
     booleanDescriptors.find((descriptor) => descriptor.id === "thinking") ?? null;
 
@@ -134,7 +129,6 @@ function getSelectedTraits(
       : getDescriptorStringValue(primarySelectDescriptor)) ?? null;
   const thinkingEnabled =
     typeof thinkingDescriptor?.currentValue === "boolean" ? thinkingDescriptor.currentValue : null;
-  const contextWindow = getDescriptorStringValue(contextWindowDescriptor);
   const selectedAgent = getDescriptorStringValue(agentDescriptor);
   const selectedAgentLabel = agentDescriptor
     ? getProviderOptionCurrentLabel(agentDescriptor)
@@ -146,13 +140,10 @@ function getSelectedTraits(
     selectDescriptors,
     booleanDescriptors,
     primarySelectDescriptor,
-    contextWindowDescriptor,
     agentDescriptor,
-    fastModeDescriptor,
     thinkingDescriptor,
     effort,
     thinkingEnabled,
-    contextWindow,
     ultrathinkPromptControlled,
     ultrathinkInBodyText,
     selectedAgent,
@@ -179,18 +170,14 @@ function getTraitsSectionVisibility(input: {
 
   const showEffort = selected.primarySelectDescriptor !== null;
   const showThinking = selected.thinkingDescriptor !== null;
-  const showFastMode = selected.fastModeDescriptor !== null;
-  const showContextWindow = selected.contextWindowDescriptor !== null;
   const showAgent = selected.agentDescriptor !== null;
 
   return {
     ...selected,
     showEffort,
     showThinking,
-    showFastMode,
-    showContextWindow,
     showAgent,
-    hasAnyControls: showEffort || showThinking || showFastMode || showContextWindow || showAgent,
+    hasAnyControls: showEffort || showThinking || showAgent,
   };
 }
 
@@ -389,29 +376,9 @@ export function buildTraitsTriggerDisplay(input: {
   descriptors: ReadonlyArray<ProviderOptionDescriptor>;
   primarySelectDescriptorId: string | null;
   ultrathinkPromptControlled: boolean;
-}): { label: string; showFastModeIcon: boolean } {
-  let hasFastMode = false;
-  let fastModeEnabled = false;
+}): { label: string } {
   const labels: Array<string> = [];
   for (const descriptor of input.descriptors) {
-    if (descriptor.id === "fastMode" && descriptor.type === "boolean") {
-      hasFastMode = true;
-      fastModeEnabled = descriptor.currentValue === true;
-      continue;
-    }
-    if (
-      input.provider === "codex" &&
-      descriptor.id === "serviceTier" &&
-      descriptor.type === "select"
-    ) {
-      const currentValue = getProviderOptionCurrentValue(descriptor);
-      const fastTier = descriptor.options.find(({ label }) => label === "Fast");
-      if (fastTier && (currentValue === "default" || currentValue === fastTier.id)) {
-        hasFastMode = true;
-        fastModeEnabled = currentValue === fastTier.id;
-        continue;
-      }
-    }
     const label =
       input.ultrathinkPromptControlled && descriptor.id === input.primarySelectDescriptorId
         ? "Ultrathink"
@@ -422,14 +389,7 @@ export function buildTraitsTriggerDisplay(input: {
       labels.push(label);
     }
   }
-
-  // Only fall back to text when fast mode is genuinely the sole trait. Keying
-  // off an empty label list alone would also catch descriptors that resolved to
-  // no label at all, printing a bogus "Normal" for a model without fast mode.
-  if (labels.length === 0 && hasFastMode) {
-    return { label: fastModeEnabled ? "Fast" : "Normal", showFastModeIcon: false };
-  }
-  return { label: labels.join(" · "), showFastModeIcon: fastModeEnabled };
+  return { label: labels.join(" · ") };
 }
 
 export const TraitsPicker = memo(function TraitsPicker({
@@ -468,18 +428,12 @@ export const TraitsPicker = memo(function TraitsPicker({
     return null;
   }
 
-  const { label: triggerLabel, showFastModeIcon } = buildTraitsTriggerDisplay({
+  const { label: triggerLabel } = buildTraitsTriggerDisplay({
     provider,
     descriptors,
     primarySelectDescriptorId: primarySelectDescriptor?.id ?? null,
     ultrathinkPromptControlled,
   });
-  const fastModeIcon = showFastModeIcon ? (
-    <>
-      <ComposerControlIcon icon={ZapIcon} className="text-foreground/80 opacity-100" />
-      <span className="sr-only">Fast mode on</span>
-    </>
-  ) : null;
 
   const isCodexStyle = provider === "codex";
 
@@ -505,13 +459,11 @@ export const TraitsPicker = memo(function TraitsPicker({
       >
         {isCodexStyle ? (
           <span className="flex min-w-0 w-full items-center gap-1.5 overflow-hidden">
-            {fastModeIcon}
             <span className="min-w-0 truncate">{triggerLabel}</span>
             <ComposerControlChevron />
           </span>
         ) : (
           <>
-            {fastModeIcon}
             <span>{triggerLabel}</span>
             <ComposerControlChevron />
           </>

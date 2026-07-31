@@ -27,6 +27,7 @@ import {
   createModelCapabilities,
   getProviderOptionBooleanSelectionValue,
   getProviderOptionStringSelectionValue,
+  modelSlugEncodesForbiddenCapability,
 } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
@@ -196,18 +197,6 @@ function findCursorEffortConfigOption(
   );
 }
 
-function isCursorContextConfigOption(option: EffectAcpSchema.SessionConfigOption): boolean {
-  const id = option.id.trim().toLowerCase();
-  const name = option.name.trim().toLowerCase();
-  return id === "context" || id === "context_size" || name.includes("context");
-}
-
-function isCursorFastConfigOption(option: EffectAcpSchema.SessionConfigOption): boolean {
-  const id = option.id.trim().toLowerCase();
-  const name = option.name.trim().toLowerCase();
-  return id === "fast" || name === "fast" || name.includes("fast mode");
-}
-
 function isCursorThinkingConfigOption(option: EffectAcpSchema.SessionConfigOption): boolean {
   const id = option.id.trim().toLowerCase();
   const name = option.name.trim().toLowerCase();
@@ -276,33 +265,9 @@ export function buildCursorCapabilitiesFromConfigOptions(
         })
       : [];
 
-  const contextOption = configOptions.find(
-    (option) => option.category === "model_config" && isCursorContextConfigOption(option),
-  );
-  const contextWindowOptions =
-    contextOption?.type === "select"
-      ? flattenSessionConfigSelectOptions(contextOption).map((entry) => {
-          if (contextOption.currentValue === entry.value) {
-            return {
-              value: entry.value,
-              label: entry.name,
-              isDefault: true,
-            };
-          }
-          return {
-            value: entry.value,
-            label: entry.name,
-          };
-        })
-      : [];
-
-  const fastOption = configOptions.find(
-    (option) => option.category === "model_config" && isCursorFastConfigOption(option),
-  );
   const thinkingOption = configOptions.find(
     (option) => option.category === "model_config" && isCursorThinkingConfigOption(option),
   );
-  const fastCurrentValue = getBooleanCurrentValue(fastOption);
   const thinkingCurrentValue = getBooleanCurrentValue(thinkingOption);
   const optionDescriptors = [
     ...(reasoningEffortLevels.length > 0
@@ -312,29 +277,6 @@ export function buildCursorCapabilitiesFromConfigOptions(
             label: reasoningConfig?.name?.trim() || "Reasoning",
             options: reasoningEffortLevels,
           }),
-        ]
-      : []),
-    ...(contextWindowOptions.length > 0
-      ? [
-          buildSelectOptionDescriptor({
-            id: "contextWindow",
-            label: contextOption?.name?.trim() || "Context Window",
-            options: contextWindowOptions,
-          }),
-        ]
-      : []),
-    ...(fastOption && isBooleanLikeConfigOption(fastOption)
-      ? [
-          typeof fastCurrentValue === "boolean"
-            ? buildBooleanOptionDescriptor({
-                id: "fastMode",
-                label: fastOption.name?.trim() || "Fast Mode",
-                currentValue: fastCurrentValue,
-              })
-            : buildBooleanOptionDescriptor({
-                id: "fastMode",
-                label: fastOption.name?.trim() || "Fast Mode",
-              }),
         ]
       : []),
     ...(thinkingOption && isBooleanLikeConfigOption(thinkingOption)
@@ -363,7 +305,9 @@ function buildCursorDiscoveredModels(
 ): ReadonlyArray<ServerProviderModel> {
   const seen = new Set<string>();
   return discoveredModels.flatMap((model) => {
-    if (!model.slug || seen.has(model.slug)) {
+    // Reject discovered slugs that encode a forbidden fast variant (e.g. a raw
+    // "-fast" slug) so they are never listed or selectable.
+    if (!model.slug || seen.has(model.slug) || modelSlugEncodesForbiddenCapability(model.slug)) {
       return [];
     }
     seen.add(model.slug);
@@ -473,7 +417,11 @@ function findCursorBooleanConfigValue(
 export function resolveCursorAcpBaseModelId(model: string | null | undefined): string {
   const trimmed = model?.trim();
   const base = trimmed && trimmed.length > 0 ? trimmed : "default";
-  return base.includes("[") ? base.slice(0, base.indexOf("[")) : base;
+  const stripped = base.includes("[") ? base.slice(0, base.indexOf("[")) : base;
+  // Fast mode is forbidden: never forward a "-fast" variant to the Cursor
+  // subprocess, even if a persisted or resumed selection still carries one. This
+  // is the sole runtime chokepoint for persisted ids, so fall back to the default.
+  return modelSlugEncodesForbiddenCapability(stripped) ? "default" : stripped;
 }
 
 export function resolveCursorAcpConfigUpdates(
@@ -504,35 +452,6 @@ export function resolveCursorAcpConfigUpdates(
     });
     if (value) {
       updates.push({ configId: reasoningOption.id, value });
-    }
-  }
-
-  const contextOption = configOptions.find(
-    (option) => option.category === "model_config" && isCursorContextConfigOption(option),
-  );
-  const requestedContextWindow = getProviderOptionStringSelectionValue(selections, "contextWindow");
-  if (contextOption && requestedContextWindow) {
-    const value = findCursorSelectOptionValue(
-      contextOption,
-      (option) =>
-        normalizeCursorConfigOptionToken(option.value) ===
-          normalizeCursorConfigOptionToken(requestedContextWindow) ||
-        normalizeCursorConfigOptionToken(option.name) ===
-          normalizeCursorConfigOptionToken(requestedContextWindow),
-    );
-    if (value) {
-      updates.push({ configId: contextOption.id, value });
-    }
-  }
-
-  const fastOption = configOptions.find(
-    (option) => option.category === "model_config" && isCursorFastConfigOption(option),
-  );
-  const requestedFastMode = getProviderOptionBooleanSelectionValue(selections, "fastMode");
-  if (fastOption && typeof requestedFastMode === "boolean") {
-    const value = findCursorBooleanConfigValue(fastOption, requestedFastMode);
-    if (value !== undefined) {
-      updates.push({ configId: fastOption.id, value });
     }
   }
 

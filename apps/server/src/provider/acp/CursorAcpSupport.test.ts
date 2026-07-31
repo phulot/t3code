@@ -99,11 +99,7 @@ describe("applyCursorAcpModelSelection", () => {
       applyCursorAcpModelSelection({
         runtime,
         model: "gpt-5.4-medium-fast[reasoning=medium,context=272k]",
-        selections: [
-          { id: "reasoning", value: "xhigh" },
-          { id: "contextWindow", value: "1m" },
-          { id: "fastMode", value: true },
-        ],
+        selections: [{ id: "reasoning", value: "xhigh" }],
         mapError: ({ step, configId, cause }) =>
           step === "set-config-option"
             ? `failed to set config option ${configId}: ${cause.message}`
@@ -114,8 +110,6 @@ describe("applyCursorAcpModelSelection", () => {
     expect(calls).toEqual([
       { type: "model", value: "gpt-5.4-medium-fast" },
       { type: "config", configId: "reasoning", value: "extra-high" },
-      { type: "config", configId: "context", value: "1m" },
-      { type: "config", configId: "fast", value: "true" },
     ]);
   });
 });

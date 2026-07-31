@@ -51,6 +51,7 @@ import {
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
   getProviderOptionDescriptors,
+  modelSlugEncodesForbiddenCapability,
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
 import * as Cause from "effect/Cause";
@@ -76,8 +77,6 @@ import {
   getClaudeModelCapabilities,
   isClaudeUltracodeEffort,
   normalizeClaudeCliEffort,
-  resolveClaudeApiModelId,
-  resolveClaudeContextWindow,
   resolveClaudeEffort,
 } from "./ClaudeProvider.ts";
 import {
@@ -334,26 +333,6 @@ function maxClaudeContextWindowFromModelUsage(
   }
 
   return maxContextWindow;
-}
-
-function selectedClaudeContextWindow(
-  modelSelection: ModelSelection | undefined,
-): number | undefined {
-  switch (modelSelection?.model) {
-    case "claude-opus-4-8":
-    case "claude-opus-4-7":
-      // Always 1M at the API; these models expose no contextWindow option.
-      return 1_000_000;
-  }
-
-  switch (resolveClaudeContextWindow(modelSelection)) {
-    case "1m":
-      return 1_000_000;
-    case "200k":
-      return 200_000;
-    default:
-      return undefined;
-  }
 }
 
 function finiteNonNegativeInteger(value: unknown): number | undefined {
@@ -3491,19 +3470,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
       const caps = getClaudeModelCapabilities(modelSelection?.model);
       const descriptors = getProviderOptionDescriptors({ caps });
-      const apiModelId = modelSelection ? resolveClaudeApiModelId(modelSelection) : undefined;
-      const initialContextWindow = selectedClaudeContextWindow(modelSelection);
+      // Reject a model id that re-enables the 1M context (a "[1m]" suffix): omit
+      // it so the Claude SDK falls back to its own default rather than 1M.
+      const apiModelId = modelSlugEncodesForbiddenCapability(modelSelection?.model)
+        ? undefined
+        : modelSelection?.model;
       const rawEffort = getModelSelectionStringOptionValue(modelSelection, "effort");
       const effort = resolveClaudeEffort(caps, rawEffort) ?? null;
-      const fastModeSupported = descriptors.some(
-        (descriptor) => descriptor.type === "boolean" && descriptor.id === "fastMode",
-      );
       const thinkingSupported = descriptors.some(
         (descriptor) => descriptor.type === "boolean" && descriptor.id === "thinking",
       );
-      const fastMode =
-        getModelSelectionBooleanOptionValue(modelSelection, "fastMode") === true &&
-        fastModeSupported;
       const thinking = thinkingSupported
         ? getModelSelectionBooleanOptionValue(modelSelection, "thinking")
         : undefined;
@@ -3517,7 +3493,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const permissionMode = runtimeModeToPermission[input.runtimeMode];
       const settings = {
         ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
-        ...(fastMode ? { fastMode: true } : {}),
         ...(ultracode ? { ultracode: true } : {}),
       };
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
@@ -3635,7 +3610,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         inFlightTools,
         claudeTasks,
         turnState: undefined,
-        lastKnownContextWindow: initialContextWindow,
+        lastKnownContextWindow: undefined,
         lastKnownTokenUsage: undefined,
         lastKnownTotalProcessedTokens: undefined,
         lastAssistantUuid: resumeState?.resumeSessionAt,
@@ -3669,7 +3644,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ...(input.cwd ? { cwd: input.cwd } : {}),
             ...(effectiveEffort ? { effort: effectiveEffort } : {}),
             ...(permissionMode ? { permissionMode } : {}),
-            ...(fastMode ? { fastMode: true } : {}),
           },
         },
         providerRefs: {},
@@ -3737,8 +3711,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       yield* completeTurn(context, "completed");
     }
 
-    if (modelSelection?.model) {
-      const apiModelId = resolveClaudeApiModelId(modelSelection);
+    // Never switch to a model id that re-enables the 1M context (a "[1m]" suffix).
+    if (modelSelection?.model && !modelSlugEncodesForbiddenCapability(modelSelection.model)) {
+      const apiModelId = modelSelection.model;
       if (context.currentApiModelId !== apiModelId) {
         yield* Effect.tryPromise({
           try: () => context.query.setModel(apiModelId),

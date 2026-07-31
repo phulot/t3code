@@ -504,8 +504,6 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
 
         const modelSelection = createModelSelection(ProviderInstanceId.make("cursor"), "gpt-5.4", [
           { id: "reasoning", value: "xhigh" },
-          { id: "contextWindow", value: "1m" },
-          { id: "fastMode", value: true },
         ]);
 
         yield* adapter.startSession({
@@ -525,13 +523,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
             ? [String((entry.params as Record<string, unknown>).configId)]
             : [],
         );
-        assert.deepStrictEqual(configIdsAfterStart, [
-          "model",
-          "reasoning",
-          "context",
-          "fast",
-          "mode",
-        ]);
+        assert.deepStrictEqual(configIdsAfterStart, ["model", "reasoning", "mode"]);
 
         yield* adapter.sendTurn({
           threadId,
@@ -549,7 +541,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
             ? [String((entry.params as Record<string, unknown>).configId)]
             : [],
         );
-        assert.deepStrictEqual(finalConfigIds, ["model", "reasoning", "context", "fast", "mode"]);
+        assert.deepStrictEqual(finalConfigIds, ["model", "reasoning", "mode"]);
         assert.equal(finalRequests.filter((entry) => entry.method === "session/prompt").length, 1);
       }),
   );
@@ -1254,7 +1246,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         input: "second turn after switching model",
         attachments: [],
         modelSelection: createModelSelection(ProviderInstanceId.make("cursor"), "composer-2", [
-          { id: "fastMode", value: true },
+          { id: "reasoning", value: "high" },
         ]),
       });
 
@@ -1271,78 +1263,12 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       assert.isAbove(setConfigRequests.length, 0, "should call session/set_config_option");
       assert.equal((setConfigRequests[0]?.params as Record<string, unknown>)?.value, "composer-2");
 
-      const fastConfigRequests = requests.filter(
-        (entry) =>
-          entry.method === "session/set_config_option" &&
-          (entry.params as Record<string, unknown> | undefined)?.configId === "fast",
-      );
-      assert.isAbove(fastConfigRequests.length, 0, "should apply fast mode as a separate config");
-      const lastFastConfig = fastConfigRequests[fastConfigRequests.length - 1];
-      assert.equal((lastFastConfig?.params as Record<string, unknown>)?.value, "true");
-
-      yield* adapter.stopSession(threadId);
-    }),
-  );
-
-  it.effect("clears prior fast mode in-session when the next turn sets fastMode: false", () =>
-    Effect.gen(function* () {
-      const adapter = yield* CursorAdapter;
-      const serverSettings = yield* ServerSettingsService;
-      const threadId = ThreadId.make("cursor-fast-mode-reset");
-      const tempDir = yield* Effect.promise(() =>
-        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-")),
-      );
-      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
-      const argvLogPath = NodePath.join(tempDir, "argv.txt");
-      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
-      const wrapperPath = yield* Effect.promise(() =>
-        makeProbeWrapper(requestLogPath, argvLogPath),
-      );
-      yield* serverSettings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
-
-      yield* adapter.startSession({
-        threadId,
-        provider: ProviderDriverKind.make("cursor"),
-        cwd: process.cwd(),
-        runtimeMode: "full-access",
-        modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "composer-2" },
-      });
-
-      yield* adapter.sendTurn({
-        threadId,
-        input: "first turn with fast mode",
-        attachments: [],
-        modelSelection: createModelSelection(ProviderInstanceId.make("cursor"), "composer-2", [
-          { id: "fastMode", value: true },
-        ]),
-      });
-
-      yield* adapter.sendTurn({
-        threadId,
-        input: "second turn without fast mode",
-        attachments: [],
-        modelSelection: createModelSelection(ProviderInstanceId.make("cursor"), "composer-2", [
-          { id: "fastMode", value: false },
-        ]),
-      });
-
-      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
-      const fastConfigRequests = requests.filter(
-        (entry) =>
-          entry.method === "session/set_config_option" &&
-          (entry.params as Record<string, unknown> | undefined)?.configId === "fast",
-      );
-      assert.isAtLeast(fastConfigRequests.length, 2, "should set fast mode on and then off");
-
-      const lastFastConfig = fastConfigRequests[fastConfigRequests.length - 1];
-      assert.equal((lastFastConfig?.params as Record<string, unknown>)?.value, "false");
-
       yield* adapter.stopSession(threadId);
     }),
   );
 
   it.effect(
-    "applies fast mode on the first turn when modelSelection uses a non-default instance id",
+    "applies a separate config option on the first turn when modelSelection uses a non-default instance id",
     () => {
       const customInstanceId = ProviderInstanceId.make("cursor_secondary");
       // Custom-instance cases can't share the suite-level `CursorAdapter`
@@ -1401,29 +1327,29 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
 
         yield* adapter.sendTurn({
           threadId,
-          input: "first turn with fast mode",
+          input: "first turn with a config option",
           attachments: [],
           modelSelection: {
             ...createModelSelection(ProviderInstanceId.make("cursor"), "composer-2", [
-              { id: "fastMode", value: true },
+              { id: "reasoning", value: "high" },
             ]),
             instanceId: customInstanceId,
           },
         });
 
         const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
-        const fastConfigRequests = requests.filter(
+        const reasoningConfigRequests = requests.filter(
           (entry) =>
             entry.method === "session/set_config_option" &&
-            (entry.params as Record<string, unknown> | undefined)?.configId === "fast",
+            (entry.params as Record<string, unknown> | undefined)?.configId === "reasoning",
         );
         assert.isAbove(
-          fastConfigRequests.length,
+          reasoningConfigRequests.length,
           0,
-          "fast mode should apply when instance id matches the adapter binding",
+          "config options should apply when instance id matches the adapter binding",
         );
-        const lastFastConfig = fastConfigRequests[fastConfigRequests.length - 1];
-        assert.equal((lastFastConfig?.params as Record<string, unknown>)?.value, "true");
+        const lastReasoningConfig = reasoningConfigRequests[reasoningConfigRequests.length - 1];
+        assert.equal((lastReasoningConfig?.params as Record<string, unknown>)?.value, "high");
 
         yield* adapter.stopSession(threadId);
       }).pipe(Effect.provide(customAdapterLayer));
