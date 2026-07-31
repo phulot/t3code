@@ -59,6 +59,8 @@ import {
   type OrchestrationEngineShape,
 } from "../src/orchestration/Services/OrchestrationEngine.ts";
 import { ThreadDeletionReactor } from "../src/orchestration/Services/ThreadDeletionReactor.ts";
+import { TriggerScheduler } from "../src/orchestration/Services/TriggerScheduler.ts";
+import { ConditionEvaluator } from "../src/orchestration/Services/ConditionEvaluator.ts";
 import { OrchestrationReactor } from "../src/orchestration/Services/OrchestrationReactor.ts";
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -364,6 +366,18 @@ export const makeOrchestrationIntegrationHarness = (
         Layer.succeed(ThreadDeletionReactor, {
           start: () => Effect.void,
           drain: Effect.void,
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.succeed(TriggerScheduler, {
+          start: () => Effect.void,
+          runTick: () => Effect.void,
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.succeed(ConditionEvaluator, {
+          start: () => Effect.void,
+          runTick: () => Effect.void,
         }),
       ),
       Layer.provideMerge(

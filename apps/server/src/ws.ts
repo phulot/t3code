@@ -26,6 +26,7 @@ import {
   type OrchestrationShellStreamEvent,
   type OrchestrationShellStreamItem,
   type OrchestrationThreadStreamItem,
+  type OrchestrationTriggersSnapshot,
   OrchestrationGetFullThreadDiffError,
   OrchestrationGetSnapshotError,
   OrchestrationGetTurnDiffError,
@@ -1334,6 +1335,44 @@ const makeWsRpcLayer = (
                 }),
                 afterSnapshot,
               );
+            }),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.subscribeTriggers]: (input) =>
+          observeRpcStreamEffect(
+            ORCHESTRATION_WS_METHODS.subscribeTriggers,
+            Effect.gen(function* () {
+              const loadTriggers = projectionSnapshotQuery
+                .getTriggersForProject(input.projectId)
+                .pipe(
+                  Effect.map((triggers) => ({ triggers })),
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationGetSnapshotError({
+                        message: `Failed to load triggers for project ${input.projectId}`,
+                        cause,
+                      }),
+                  ),
+                );
+
+              // Attach live delivery before reading the initial snapshot so a
+              // trigger event landing during the initial read is not lost. Any
+              // trigger-aggregate event re-reads the project's full list and
+              // re-emits it: triggers are low-frequency and the list is small,
+              // so re-sending the whole list per event is simpler and cheaper
+              // than reducing deltas on the client.
+              const liveBuffer = yield* Queue.unbounded<OrchestrationTriggersSnapshot>();
+              yield* Effect.forkScoped(
+                orchestrationEngine.streamDomainEvents.pipe(
+                  Stream.filter((event) => event.aggregateKind === "trigger"),
+                  Stream.mapEffect(() => loadTriggers),
+                  Stream.runForEach((snapshot) => Queue.offer(liveBuffer, snapshot)),
+                ),
+                { startImmediately: true },
+              );
+
+              const initial = yield* loadTriggers;
+              return Stream.concat(Stream.make(initial), Stream.fromQueue(liveBuffer));
             }),
             { "rpc.aggregate": "orchestration" },
           ),

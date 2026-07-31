@@ -17,6 +17,7 @@ import { toPersistenceSqlError, type ProjectionRepositoryError } from "../../per
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
 import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
+import { ProjectionTriggerRepository } from "../../persistence/Services/ProjectionTriggers.ts";
 import { ProjectionStateRepository } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { type ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
@@ -36,6 +37,7 @@ import {
 import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
 import { ProjectionProjectRepositoryLive } from "../../persistence/Layers/ProjectionProjects.ts";
+import { ProjectionTriggerRepositoryLive } from "../../persistence/Layers/ProjectionTriggers.ts";
 import { ProjectionStateRepositoryLive } from "../../persistence/Layers/ProjectionState.ts";
 import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
@@ -57,6 +59,7 @@ import {
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
+  triggers: "projection.triggers",
   threads: "projection.threads",
   threadMessages: "projection.thread-messages",
   threadProposedPlans: "projection.thread-proposed-plans",
@@ -473,6 +476,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const eventStore = yield* OrchestrationEventStore;
     const projectionStateRepository = yield* ProjectionStateRepository;
     const projectionProjectRepository = yield* ProjectionProjectRepository;
+    const projectionTriggerRepository = yield* ProjectionTriggerRepository;
     const projectionThreadRepository = yield* ProjectionThreadRepository;
     const projectionThreadMessageRepository = yield* ProjectionThreadMessageRepository;
     const projectionThreadProposedPlanRepository = yield* ProjectionThreadProposedPlanRepository;
@@ -538,6 +542,141 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           });
           return;
         }
+
+        default:
+          return;
+      }
+    });
+
+    const applyTriggersProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyTriggersProjection",
+    )(function* (event, _attachmentSideEffects) {
+      switch (event.type) {
+        case "trigger.created":
+          yield* projectionTriggerRepository.upsert({
+            triggerId: event.payload.triggerId,
+            projectId: event.payload.projectId,
+            name: event.payload.name,
+            condition: event.payload.condition,
+            action: event.payload.action,
+            enabled: event.payload.enabled,
+            consecutiveTransientFailures: 0,
+            lastFiredAt: null,
+            lastOutcome: null,
+            nextEligibleAt: null,
+            conditionTruth: null,
+            windowMs: event.payload.windowMs ?? null,
+            delayMs: event.payload.delayMs ?? null,
+            windowOpenedAt: null,
+            fireDueAt: null,
+            createdAt: event.payload.createdAt,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+
+        case "trigger.updated": {
+          const existingRow = yield* projectionTriggerRepository.getById({
+            triggerId: event.payload.triggerId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionTriggerRepository.upsert({
+            ...existingRow.value,
+            ...(event.payload.name !== undefined ? { name: event.payload.name } : {}),
+            // A condition change resets the composite partial runtime state:
+            // the old window/delay/truth no longer describe the new condition.
+            ...(event.payload.condition !== undefined
+              ? {
+                  condition: event.payload.condition,
+                  conditionTruth: null,
+                  windowOpenedAt: null,
+                  fireDueAt: null,
+                }
+              : {}),
+            ...(event.payload.action !== undefined ? { action: event.payload.action } : {}),
+            ...(event.payload.windowMs !== undefined ? { windowMs: event.payload.windowMs } : {}),
+            ...(event.payload.delayMs !== undefined ? { delayMs: event.payload.delayMs } : {}),
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "trigger.enabled": {
+          const existingRow = yield* projectionTriggerRepository.getById({
+            triggerId: event.payload.triggerId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionTriggerRepository.upsert({
+            ...existingRow.value,
+            enabled: true,
+            // Re-enabling clears the failure streak so an auto-disabled
+            // trigger resumes from a clean slate; the composite partial runtime
+            // state is reset too so it re-arms from rest on the next tick.
+            consecutiveTransientFailures: 0,
+            conditionTruth: null,
+            windowOpenedAt: null,
+            fireDueAt: null,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "trigger.disabled":
+        case "trigger.auto-disabled": {
+          const existingRow = yield* projectionTriggerRepository.getById({
+            triggerId: event.payload.triggerId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionTriggerRepository.upsert({
+            ...existingRow.value,
+            enabled: false,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "trigger.fire-started": {
+          const existingRow = yield* projectionTriggerRepository.getById({
+            triggerId: event.payload.triggerId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionTriggerRepository.upsert({
+            ...existingRow.value,
+            lastFiredAt: event.payload.firedAt,
+            nextEligibleAt: event.payload.nextEligibleAt,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "trigger.fire-settled": {
+          const existingRow = yield* projectionTriggerRepository.getById({
+            triggerId: event.payload.triggerId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionTriggerRepository.upsert({
+            ...existingRow.value,
+            lastOutcome: event.payload.outcome,
+            consecutiveTransientFailures: event.payload.consecutiveTransientFailures,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "trigger.deleted":
+          yield* projectionTriggerRepository.deleteById({
+            triggerId: event.payload.triggerId,
+          });
+          return;
 
         default:
           return;
@@ -1552,6 +1691,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         apply: applyProjectsProjection,
       },
       {
+        name: ORCHESTRATION_PROJECTOR_NAMES.triggers,
+        apply: applyTriggersProjection,
+      },
+      {
         name: ORCHESTRATION_PROJECTOR_NAMES.threadMessages,
         apply: applyThreadMessagesProjection,
       },
@@ -1678,6 +1821,7 @@ export const OrchestrationProjectionPipelineLive = Layer.effect(
   makeOrchestrationProjectionPipeline(),
 ).pipe(
   Layer.provideMerge(ProjectionProjectRepositoryLive),
+  Layer.provideMerge(ProjectionTriggerRepositoryLive),
   Layer.provideMerge(ProjectionThreadRepositoryLive),
   Layer.provideMerge(ProjectionThreadMessageRepositoryLive),
   Layer.provideMerge(ProjectionThreadProposedPlanRepositoryLive),

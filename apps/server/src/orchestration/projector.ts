@@ -1,4 +1,9 @@
-import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@t3tools/contracts";
+import type {
+  OrchestrationEvent,
+  OrchestrationReadModel,
+  OrchestrationTrigger,
+  ThreadId,
+} from "@t3tools/contracts";
 import {
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
@@ -30,9 +35,18 @@ import {
   ThreadRevertedPayload,
   ThreadSessionSetPayload,
   ThreadTurnDiffCompletedPayload,
+  TriggerCreatedPayload,
+  TriggerUpdatedPayload,
+  TriggerEnabledPayload,
+  TriggerDisabledPayload,
+  TriggerDeletedPayload,
+  TriggerFireStartedPayload,
+  TriggerFireSettledPayload,
+  TriggerAutoDisabledPayload,
 } from "./Schemas.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
+type TriggerPatch = Partial<Omit<OrchestrationTrigger, "id" | "projectId">>;
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
 
@@ -71,6 +85,14 @@ function updateThread(
   patch: ThreadPatch,
 ): OrchestrationThread[] {
   return threads.map((thread) => (thread.id === threadId ? { ...thread, ...patch } : thread));
+}
+
+function updateTrigger(
+  triggers: ReadonlyArray<OrchestrationTrigger>,
+  triggerId: OrchestrationTrigger["id"],
+  patch: TriggerPatch,
+): OrchestrationTrigger[] {
+  return triggers.map((trigger) => (trigger.id === triggerId ? { ...trigger, ...patch } : trigger));
 }
 
 function decodeForEvent<A>(
@@ -186,6 +208,7 @@ export function createEmptyReadModel(nowIso: string): OrchestrationReadModel {
   return {
     snapshotSequence: 0,
     projects: [],
+    triggers: [],
     threads: [],
     updatedAt: nowIso,
   };
@@ -264,6 +287,116 @@ export function projectEvent(
                 }
               : project,
           ),
+        })),
+      );
+
+    case "trigger.created":
+      return decodeForEvent(TriggerCreatedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => {
+          const existing = nextBase.triggers.find((entry) => entry.id === payload.triggerId);
+          const nextTrigger: OrchestrationTrigger = {
+            id: payload.triggerId,
+            projectId: payload.projectId,
+            name: payload.name,
+            condition: payload.condition,
+            action: payload.action,
+            enabled: payload.enabled,
+            consecutiveTransientFailures: 0,
+            lastFiredAt: null,
+            lastOutcome: null,
+            nextEligibleAt: null,
+            createdAt: payload.createdAt,
+            updatedAt: payload.updatedAt,
+          };
+          return {
+            ...nextBase,
+            triggers: existing
+              ? nextBase.triggers.map((entry) =>
+                  entry.id === payload.triggerId ? nextTrigger : entry,
+                )
+              : [...nextBase.triggers, nextTrigger],
+          };
+        }),
+      );
+
+    case "trigger.updated":
+      return decodeForEvent(TriggerUpdatedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          triggers: updateTrigger(nextBase.triggers, payload.triggerId, {
+            ...(payload.name !== undefined ? { name: payload.name } : {}),
+            ...(payload.condition !== undefined ? { condition: payload.condition } : {}),
+            ...(payload.action !== undefined ? { action: payload.action } : {}),
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "trigger.enabled":
+      return decodeForEvent(TriggerEnabledPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          triggers: updateTrigger(nextBase.triggers, payload.triggerId, {
+            enabled: true,
+            // Re-enabling clears the failure counter so a previously
+            // auto-disabled trigger starts from a clean slate.
+            consecutiveTransientFailures: 0,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "trigger.disabled":
+      return decodeForEvent(TriggerDisabledPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          triggers: updateTrigger(nextBase.triggers, payload.triggerId, {
+            enabled: false,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "trigger.deleted":
+      return decodeForEvent(TriggerDeletedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          triggers: nextBase.triggers.filter((entry) => entry.id !== payload.triggerId),
+        })),
+      );
+
+    case "trigger.fire-started":
+      return decodeForEvent(TriggerFireStartedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          triggers: updateTrigger(nextBase.triggers, payload.triggerId, {
+            lastFiredAt: payload.firedAt,
+            nextEligibleAt: payload.nextEligibleAt,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "trigger.fire-settled":
+      return decodeForEvent(TriggerFireSettledPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          triggers: updateTrigger(nextBase.triggers, payload.triggerId, {
+            lastOutcome: payload.outcome,
+            consecutiveTransientFailures: payload.consecutiveTransientFailures,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "trigger.auto-disabled":
+      return decodeForEvent(TriggerAutoDisabledPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          triggers: updateTrigger(nextBase.triggers, payload.triggerId, {
+            enabled: false,
+            updatedAt: payload.updatedAt,
+          }),
         })),
       );
 

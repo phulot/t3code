@@ -98,6 +98,13 @@ import * as ResourceAttribution from "./resourceTelemetry/ResourceAttribution.ts
 import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinary.ts";
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
+import { SessionLauncherLive } from "./orchestration/Layers/SessionLauncher.ts";
+import { TriggerSchedulerLive } from "./orchestration/Layers/TriggerScheduler.ts";
+import { ConditionEvaluatorLive } from "./orchestration/Layers/ConditionEvaluator.ts";
+import { AtomDomainRegistryLive } from "./orchestration/Layers/AtomDomainRegistry.ts";
+import { EventIngestionLive } from "./orchestration/Layers/EventIngestion.ts";
+import { ExternalEventJournalLive } from "./persistence/Layers/ExternalEventJournal.ts";
+import { githubWebhookRouteLayer } from "./orchestration/GithubWebhookRoute.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -213,6 +220,24 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
+  // The temporal trigger scheduler fires due triggers by launching sessions, so
+  // it depends on `SessionLauncher`. Both are provided here so the scheduler is
+  // resolvable by `OrchestrationReactor` (which starts it) and `SessionLauncher`
+  // stays re-exposed to higher layers via `provideMerge`.
+  Layer.provideMerge(TriggerSchedulerLive),
+  // The atom STATE condition evaluator polls atom triggers and fires them
+  // through the same session-launch pipeline as the scheduler. It resolves atom
+  // descriptors (and their git runner) via the atom registry, which is made
+  // self-contained here by providing `VcsProcess`.
+  Layer.provideMerge(ConditionEvaluatorLive),
+  // The event-ingestion path journals normalized external facts (e.g. GitHub
+  // webhook deliveries) and fires the matching TRANSIENT atom triggers through
+  // the same session-launch pipeline. Its journal writes to the SQLite
+  // persistence provided by the core dependencies.
+  Layer.provideMerge(EventIngestionLive),
+  Layer.provideMerge(ExternalEventJournalLive),
+  Layer.provideMerge(AtomDomainRegistryLive.pipe(Layer.provide(VcsProcess.layer))),
+  Layer.provideMerge(SessionLauncherLive),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
@@ -384,6 +409,10 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
 );
 
 const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
+  // `SessionLauncher` (and the trigger scheduler that depends on it) are wired
+  // inside `ReactorLayerLive`, consuming the orchestration engine, git workflow,
+  // setup script runner and project projection from the core dependencies, and
+  // remain re-exposed here via `provideMerge`.
   // Misc.
   Layer.provideMerge(BackgroundLayerLive),
   Layer.provideMerge(ResourceDiagnosticsLayerLive),
@@ -408,11 +437,14 @@ export const makeRoutesLayer = Layer.mergeAll(
       Layer.provide(environmentAuthenticatedAuthLayer),
     ),
     otlpTracesProxyRouteLayer,
+    githubWebhookRouteLayer,
     assetRouteLayer,
     staticAndDevRouteLayer,
     websocketRpcRouteLayer,
   ),
-  McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),
+  McpHttpServer.layer.pipe(
+    Layer.provide(McpSessionRegistry.layer.pipe(Layer.provide(T3ProjectFileLoader.layer))),
+  ),
 ).pipe(
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer),

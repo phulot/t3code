@@ -6,9 +6,11 @@ import * as Scope from "effect/Scope";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
+import { ConditionEvaluator } from "../Services/ConditionEvaluator.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
+import { TriggerScheduler } from "../Services/TriggerScheduler.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
@@ -65,6 +67,24 @@ describe("OrchestrationReactor", () => {
           }),
         ),
         Layer.provideMerge(
+          Layer.succeed(TriggerScheduler, {
+            start: () => {
+              started.push("trigger-scheduler");
+              return Effect.void;
+            },
+            runTick: () => Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(ConditionEvaluator, {
+            start: () => {
+              started.push("condition-evaluator");
+              return Effect.void;
+            },
+            runTick: () => Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
           Layer.succeed(AgentAwarenessRelay.AgentAwarenessRelay, {
             publishThread: () => Effect.void,
             start: () => {
@@ -85,6 +105,8 @@ describe("OrchestrationReactor", () => {
       "provider-command-reactor",
       "checkpoint-reactor",
       "thread-deletion-reactor",
+      "trigger-scheduler",
+      "condition-evaluator",
       "agent-awareness-relay",
     ]);
 

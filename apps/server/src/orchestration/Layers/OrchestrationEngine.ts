@@ -3,6 +3,8 @@ import type {
   OrchestrationReadModel,
   ProjectId,
   ThreadId,
+  TriggerCondition,
+  TriggerId,
 } from "@t3tools/contracts";
 import { OrchestrationCommand } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -38,6 +40,7 @@ import {
   type OrchestrationProjectorDecodeError,
 } from "../Errors.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
+import { lookupAtomDescriptor, validateAtom } from "../Services/AtomDomainRegistry.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -57,8 +60,8 @@ interface CommandEnvelope {
 }
 
 function commandToAggregateRef(command: OrchestrationCommand): {
-  readonly aggregateKind: "project" | "thread";
-  readonly aggregateId: ProjectId | ThreadId;
+  readonly aggregateKind: "project" | "trigger" | "thread";
+  readonly aggregateId: ProjectId | TriggerId | ThreadId;
 } {
   switch (command.type) {
     case "project.create":
@@ -68,12 +71,138 @@ function commandToAggregateRef(command: OrchestrationCommand): {
         aggregateKind: "project",
         aggregateId: command.projectId,
       };
+    case "trigger.create":
+    case "trigger.update":
+    case "trigger.enable":
+    case "trigger.disable":
+    case "trigger.delete":
+    case "trigger.fire-started":
+    case "trigger.fire-settled":
+      return {
+        aggregateKind: "trigger",
+        aggregateId: command.triggerId,
+      };
     default:
       return {
         aggregateKind: "thread",
         aggregateId: command.threadId,
       };
   }
+}
+
+function conditionInvariant(
+  commandType: OrchestrationCommand["type"],
+  detail: string,
+): OrchestrationCommandInvariantError {
+  return new OrchestrationCommandInvariantError({ commandType, detail });
+}
+
+/**
+ * Recursively validate a condition tree against the atom catalog and the
+ * composite invariants (Decision D19), before the (pure) decider ever sees the
+ * command:
+ * - an atom leaf must resolve to a known type with valid params;
+ * - `and`/`or` require at least two sub-conditions;
+ * - `not` may only negate a STATE atom (never a transient atom nor a nested
+ *   composite);
+ * - a `temporal` node may only appear at the top level, never nested inside a
+ *   composite.
+ * Any breach surfaces as an {@link OrchestrationCommandInvariantError} so the
+ * caller gets a clean rejection instead of a trigger that can never evaluate.
+ */
+function validateConditionNode(
+  commandType: OrchestrationCommand["type"],
+  condition: TriggerCondition,
+  nested: boolean,
+): Effect.Effect<void, OrchestrationCommandInvariantError> {
+  switch (condition.kind) {
+    case "temporal":
+      return nested
+        ? Effect.fail(
+            conditionInvariant(
+              commandType,
+              "A 'temporal' condition may not appear inside a composite condition.",
+            ),
+          )
+        : Effect.void;
+
+    case "atom":
+      return validateAtom(condition.atom).pipe(
+        Effect.mapError(
+          (cause) =>
+            new OrchestrationCommandInvariantError({
+              commandType,
+              detail: cause.message,
+              cause,
+            }),
+        ),
+      );
+
+    case "and":
+    case "or":
+      if (condition.conditions.length < 2) {
+        return Effect.fail(
+          conditionInvariant(
+            commandType,
+            `A '${condition.kind}' condition requires at least two sub-conditions.`,
+          ),
+        );
+      }
+      return Effect.forEach(
+        condition.conditions,
+        (child) => validateConditionNode(commandType, child, true),
+        { discard: true },
+      );
+
+    case "not": {
+      const child = condition.condition;
+      if (child.kind !== "atom") {
+        return Effect.fail(
+          conditionInvariant(
+            commandType,
+            "A 'not' condition may only negate a state atom, not a composite condition.",
+          ),
+        );
+      }
+      return Option.match(lookupAtomDescriptor(child.atom), {
+        onNone: () =>
+          Effect.fail(
+            conditionInvariant(
+              commandType,
+              `Unknown atom type '${child.atom.domain}/${child.atom.type}'.`,
+            ),
+          ),
+        onSome: (descriptor) =>
+          descriptor.nature !== "state"
+            ? Effect.fail(
+                conditionInvariant(
+                  commandType,
+                  "A 'not' condition may only negate a state atom, not a transient one.",
+                ),
+              )
+            : validateConditionNode(commandType, child, true),
+      });
+    }
+  }
+}
+
+/**
+ * Validate the condition carried by a `trigger.create` (condition required) or
+ * `trigger.update` (condition optional) command; a no-op for anything else.
+ */
+function validateCommandCondition(
+  command: OrchestrationCommand,
+): Effect.Effect<void, OrchestrationCommandInvariantError> {
+  const condition =
+    command.type === "trigger.create"
+      ? command.condition
+      : command.type === "trigger.update"
+        ? command.condition
+        : undefined;
+  if (condition === undefined) {
+    return Effect.void;
+  }
+  return validateConditionNode(command.type, condition, false);
 }
 
 const makeOrchestrationEngine = Effect.gen(function* () {
@@ -149,6 +278,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             detail: existingReceipt.value.error ?? "Previously rejected.",
           });
         }
+
+        yield* validateCommandCondition(envelope.command);
 
         const eventBase = yield* decideOrchestrationCommand({
           command: envelope.command,

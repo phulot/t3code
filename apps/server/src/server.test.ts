@@ -83,6 +83,10 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import { OrchestrationListenerCallbackError } from "./orchestration/Errors.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
+import { SessionLauncherService } from "./orchestration/Services/SessionLauncher.ts";
+import { EventIngestion } from "./orchestration/Services/EventIngestion.ts";
+import { ProjectionProjectRepository } from "./persistence/Services/ProjectionProjects.ts";
+import { ProjectionThreadRepository } from "./persistence/Services/ProjectionThreads.ts";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
@@ -147,6 +151,7 @@ const makeDefaultOrchestrationReadModel = () => {
   return {
     snapshotSequence: 0,
     updatedAt: now,
+    triggers: [],
     projects: [
       {
         id: defaultProjectId,
@@ -734,6 +739,7 @@ const buildAppUnderTest = (options?: {
           getThreadShellById: () => Effect.succeed(Option.none()),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+          getTriggersForProject: () => Effect.succeed([]),
           getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
           getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
           getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
@@ -742,23 +748,44 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(
-        Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({
-          getTurnDiff: () =>
-            Effect.succeed({
-              threadId: defaultThreadId,
-              fromTurnCount: 0,
-              toTurnCount: 0,
-              diff: "",
-            }),
-          getFullThreadDiff: () =>
-            Effect.succeed({
-              threadId: defaultThreadId,
-              fromTurnCount: 0,
-              toTurnCount: 0,
-              diff: "",
-            }),
-          ...options?.layers?.checkpointDiffQuery,
-        }),
+        Layer.mergeAll(
+          Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({
+            getTurnDiff: () =>
+              Effect.succeed({
+                threadId: defaultThreadId,
+                fromTurnCount: 0,
+                toTurnCount: 0,
+                diff: "",
+              }),
+            getFullThreadDiff: () =>
+              Effect.succeed({
+                threadId: defaultThreadId,
+                fromTurnCount: 0,
+                toTurnCount: 0,
+                diff: "",
+              }),
+            ...options?.layers?.checkpointDiffQuery,
+          }),
+          Layer.mock(SessionLauncherService)({
+            startSession: () => Effect.succeed({ threadId: defaultThreadId, sequence: 0 }),
+            resumeSession: () => Effect.succeed({ sequence: 0 }),
+          }),
+          Layer.mock(EventIngestion)({
+            ingest: () => Effect.succeed({ inserted: false, fired: 0 }),
+          }),
+          Layer.mock(ProjectionThreadRepository)({
+            upsert: () => Effect.void,
+            getById: () => Effect.succeed(Option.none()),
+            listByProjectId: () => Effect.succeed([]),
+            deleteById: () => Effect.void,
+          }),
+          Layer.mock(ProjectionProjectRepository)({
+            upsert: () => Effect.void,
+            getById: () => Effect.succeed(Option.none()),
+            listAll: () => Effect.succeed([]),
+            deleteById: () => Effect.void,
+          }),
+        ),
       ),
     );
 
@@ -5681,6 +5708,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const snapshot = {
         snapshotSequence: 1,
         updatedAt: now,
+        triggers: [],
         projects: [
           {
             id: ProjectId.make("project-a"),
