@@ -22,6 +22,7 @@ import {
 import type { DraftComposerImageAttachment } from "../lib/composerImages";
 import { scopedThreadKey } from "../lib/scopedEntities";
 import { buildThreadFeed } from "../lib/threadActivity";
+import { scopeThreadDetailToSession } from "../features/threads/threadPresentation";
 import { appAtomRegistry } from "../state/atom-registry";
 import {
   appendComposerDraftAttachments,
@@ -74,8 +75,14 @@ export function useThreadDraftForThread(input: {
 }
 
 export function useThreadComposerState() {
-  const { selectedThread: selectedThreadShell } = useThreadSelection();
+  const {
+    selectedThread: selectedThreadShell,
+    sessions,
+    activeSessionId,
+    activeSession,
+  } = useThreadSelection();
   const selectedThreadDetail = useSelectedThreadDetail();
+  const isMultiSession = sessions.length > 1;
   const composerDrafts = useAtomValue(composerDraftsAtom);
   const queuedMessagesByThreadKey = useThreadOutboxMessages();
 
@@ -90,10 +97,17 @@ export function useThreadComposerState() {
     () => (selectedThreadKey ? (queuedMessagesByThreadKey[selectedThreadKey] ?? []) : []),
     [queuedMessagesByThreadKey, selectedThreadKey],
   );
-  const selectedThreadFeed = useMemo(
-    () => (selectedThreadDetail ? buildThreadFeed(selectedThreadDetail) : []),
-    [selectedThreadDetail],
-  );
+  const selectedThreadFeed = useMemo(() => {
+    if (!selectedThreadDetail) {
+      return [];
+    }
+    // Narrow the feed to the active session's messages when the thread hosts
+    // multiple chats; single-session threads are returned unchanged.
+    const scoped = isMultiSession
+      ? scopeThreadDetailToSession(selectedThreadDetail, activeSessionId)
+      : selectedThreadDetail;
+    return buildThreadFeed(scoped);
+  }, [selectedThreadDetail, isMultiSession, activeSessionId]);
 
   const selectedDraft = selectedThreadKey ? composerDrafts[selectedThreadKey] : null;
   const draftMessage = selectedDraft?.text ?? "";
@@ -104,17 +118,26 @@ export function useThreadComposerState() {
   const runtimeMode = selectedDraft?.runtimeMode ?? selectedThread?.runtimeMode ?? null;
   const interactionMode = selectedDraft?.interactionMode ?? selectedThread?.interactionMode ?? null;
 
-  const selectedThreadSessionActivity = useMemo(() => {
+  // The active session drives the composer's busy/working state when the thread
+  // hosts multiple chats; legacy single-session threads use the scalar session.
+  const resolvedSession = useMemo(() => {
+    if (isMultiSession) {
+      return activeSession;
+    }
     const selectedThread = selectedThreadDetail ?? selectedThreadShell;
-    if (!selectedThread?.session) {
+    return selectedThread?.session ?? null;
+  }, [activeSession, isMultiSession, selectedThreadDetail, selectedThreadShell]);
+
+  const selectedThreadSessionActivity = useMemo(() => {
+    if (!resolvedSession) {
       return null;
     }
 
     return {
-      orchestrationStatus: selectedThread.session.status,
-      activeTurnId: selectedThread.session.activeTurnId ?? undefined,
+      orchestrationStatus: resolvedSession.status,
+      activeTurnId: resolvedSession.activeTurnId ?? undefined,
     };
-  }, [selectedThreadDetail, selectedThreadShell]);
+  }, [resolvedSession]);
 
   const activeWorkStartedAt = useMemo(() => {
     const selectedThread = selectedThreadDetail ?? selectedThreadShell;
@@ -131,7 +154,7 @@ export function useThreadComposerState() {
 
   const activeThreadBusy =
     !!selectedThread &&
-    (selectedThread.session?.status === "running" || selectedThread.session?.status === "starting");
+    (resolvedSession?.status === "running" || resolvedSession?.status === "starting");
 
   const onSendMessage = useCallback(async () => {
     if (!selectedThreadShell) {
@@ -161,6 +184,9 @@ export function useThreadComposerState() {
       commandId: CommandId.make(metadata.commandId),
       text,
       attachments,
+      // Only tag a session when the thread hosts multiple chats, so
+      // single-session sends stay byte-identical (default session).
+      ...(isMultiSession ? { sessionId: activeSessionId } : {}),
       modelSelection: draft.modelSelection ?? thread.modelSelection,
       runtimeMode: draft.runtimeMode ?? thread.runtimeMode,
       interactionMode: draft.interactionMode ?? thread.interactionMode,
@@ -179,7 +205,7 @@ export function useThreadComposerState() {
       );
     });
     return messageId;
-  }, [selectedThreadDetail, selectedThreadShell]);
+  }, [activeSessionId, isMultiSession, selectedThreadDetail, selectedThreadShell]);
 
   const onChangeDraftMessage = useCallback(
     (value: string) => {

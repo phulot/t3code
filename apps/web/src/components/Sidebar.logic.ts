@@ -1,6 +1,8 @@
 import * as React from "react";
-import type { ContextMenuItem } from "@t3tools/contracts";
+import type { ContextMenuItem, OrchestrationSession } from "@t3tools/contracts";
+import { DEFAULT_SESSION_ID } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
+import { scopedSessionVisitKey } from "@t3tools/client-runtime/environment";
 import {
   getThreadSortTimestamp,
   sortThreads,
@@ -126,26 +128,71 @@ export interface ThreadStatusPill {
   pulse: boolean;
 }
 
-const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
+// ATTENTION ordering for the THREAD-level aggregate — distinct from an activity
+// ordering. A finished session demands the user (Completed) more than a session
+// that is still working, so Completed ranks ABOVE Working here. Used only to
+// combine per-session/per-thread pills into a single "does this need me" signal.
+const THREAD_ATTENTION_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Pending Approval": 5,
   "Awaiting Input": 4,
-  Working: 3,
-  Connecting: 3,
-  "Plan Ready": 2,
-  Completed: 1,
+  "Plan Ready": 3,
+  Completed: 2,
+  Working: 1,
+  Connecting: 1,
 };
 
-type ThreadStatusInput = Pick<
+/** Reduce a set of pills to the single highest-ATTENTION pill (nulls ignored). */
+export function combineStatusPills(
+  pills: ReadonlyArray<ThreadStatusPill | null>,
+): ThreadStatusPill | null {
+  let best: ThreadStatusPill | null = null;
+  for (const pill of pills) {
+    if (pill === null) continue;
+    if (
+      best === null ||
+      THREAD_ATTENTION_PRIORITY[pill.label] > THREAD_ATTENTION_PRIORITY[best.label]
+    ) {
+      best = pill;
+    }
+  }
+  return best;
+}
+
+type ThreadStatusFlags = Pick<
   SidebarThreadSummary,
-  | "hasActionableProposedPlan"
-  | "hasPendingApprovals"
-  | "hasPendingUserInput"
-  | "interactionMode"
-  | "latestTurn"
-  | "session"
-> & {
-  lastVisitedAt?: string | undefined;
-};
+  "hasActionableProposedPlan" | "hasPendingApprovals" | "hasPendingUserInput" | "interactionMode"
+>;
+
+type ThreadStatusInput = ThreadStatusFlags &
+  Pick<SidebarThreadSummary, "latestTurn" | "session"> & {
+    lastVisitedAt?: string | undefined;
+    // Multi-session source of truth; when present the aggregate maps over these.
+    sessions?: ReadonlyArray<OrchestrationSession> | undefined;
+    // Per-session seen/unseen markers keyed by session id (see sessionKeyOf).
+    sessionLastVisitedAtById?: Record<string, string | undefined> | undefined;
+  };
+
+function sessionKeyOf(session: Pick<OrchestrationSession, "sessionId">): string {
+  return session.sessionId ?? DEFAULT_SESSION_ID;
+}
+
+// Projects the globally-keyed session-visit store down to a per-thread map keyed
+// by bare sessionId, the shape resolveThreadStatusPill expects. Returns undefined
+// when the thread has no sessions so the aggregate falls back to thread scope.
+export function buildSessionLastVisitedAtById(input: {
+  sessions?: ReadonlyArray<OrchestrationSession> | undefined;
+  threadKey: string;
+  sessionLastVisitedAtById: Record<string, string>;
+}): Record<string, string | undefined> | undefined {
+  const { sessions, threadKey, sessionLastVisitedAtById } = input;
+  if (!sessions || sessions.length === 0) return undefined;
+  const result: Record<string, string | undefined> = {};
+  for (const session of sessions) {
+    const sessionId = sessionKeyOf(session);
+    result[sessionId] = sessionLastVisitedAtById[scopedSessionVisitKey(threadKey, sessionId)];
+  }
+  return result;
+}
 
 export interface ThreadJumpHintVisibilityController {
   sync: (shouldShow: boolean) => void;
@@ -239,7 +286,10 @@ export function useThreadJumpHintVisibility(): {
   };
 }
 
-export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
+export function hasUnseenCompletion(thread: {
+  latestTurn: ThreadStatusInput["latestTurn"];
+  lastVisitedAt?: string | undefined;
+}): boolean {
   if (!thread.latestTurn?.completedAt) return false;
   const completedAt = Date.parse(thread.latestTurn.completedAt);
   if (Number.isNaN(completedAt)) return false;
@@ -557,12 +607,21 @@ export function formatWorkingDurationLabel(elapsedMs: number): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
-export function resolveThreadStatusPill(input: {
-  thread: ThreadStatusInput;
+/**
+ * The LITERAL status pill for a single session (chat): today's single-session
+ * core, now expressed over an explicit session + latest turn + thread flags.
+ * The per-tab/per-session view renders this unchanged; the thread aggregate
+ * combines these by attention priority.
+ */
+export function resolveSessionStatusPill(input: {
+  session: ThreadStatusInput["session"];
+  latestTurn: ThreadStatusInput["latestTurn"];
+  flags: ThreadStatusFlags;
+  lastVisitedAt?: string | undefined;
 }): ThreadStatusPill | null {
-  const { thread } = input;
+  const { flags, lastVisitedAt, latestTurn, session } = input;
 
-  if (thread.hasPendingApprovals) {
+  if (flags.hasPendingApprovals) {
     return {
       label: "Pending Approval",
       colorClass: "text-amber-600 dark:text-amber-300/90",
@@ -571,7 +630,7 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
-  if (thread.hasPendingUserInput) {
+  if (flags.hasPendingUserInput) {
     return {
       label: "Awaiting Input",
       colorClass: "text-indigo-600 dark:text-indigo-300/90",
@@ -580,7 +639,7 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
-  if (thread.session?.status === "running") {
+  if (session?.status === "running") {
     return {
       label: "Working",
       colorClass: "text-sky-600 dark:text-sky-300/80",
@@ -589,7 +648,7 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
-  if (thread.session?.status === "starting") {
+  if (session?.status === "starting") {
     return {
       label: "Connecting",
       colorClass: "text-sky-600 dark:text-sky-300/80",
@@ -599,10 +658,10 @@ export function resolveThreadStatusPill(input: {
   }
 
   const hasPlanReadyPrompt =
-    !thread.hasPendingUserInput &&
-    thread.interactionMode === "plan" &&
-    isLatestTurnSettled(thread.latestTurn, thread.session) &&
-    thread.hasActionableProposedPlan;
+    !flags.hasPendingUserInput &&
+    flags.interactionMode === "plan" &&
+    isLatestTurnSettled(latestTurn, session) &&
+    flags.hasActionableProposedPlan;
   if (hasPlanReadyPrompt) {
     return {
       label: "Plan Ready",
@@ -612,7 +671,7 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
-  if (hasUnseenCompletion(thread)) {
+  if (hasUnseenCompletion({ latestTurn, lastVisitedAt })) {
     return {
       label: "Completed",
       colorClass: "text-emerald-600 dark:text-emerald-300/90",
@@ -624,22 +683,56 @@ export function resolveThreadStatusPill(input: {
   return null;
 }
 
+/**
+ * THREAD-level attention pill: aggregate the per-session pills of ALL sessions
+ * by attention priority. A thread that only carries the scalar `session`
+ * (legacy / pre-multi-session) aggregates over that single session and is
+ * byte-for-byte identical to the previous single-pill behavior.
+ *
+ * NOTE (per-session flag attribution): pending-approval / user-input /
+ * actionable-plan flags are thread-level (they carry no sessionId), so they are
+ * applied to every session's pill. The thread AGGREGATE stays correct; the
+ * flags simply are not pinned to one specific tab.
+ */
+export function resolveThreadStatusPill(input: {
+  thread: ThreadStatusInput;
+}): ThreadStatusPill | null {
+  const { thread } = input;
+  const flags: ThreadStatusFlags = {
+    hasActionableProposedPlan: thread.hasActionableProposedPlan,
+    hasPendingApprovals: thread.hasPendingApprovals,
+    hasPendingUserInput: thread.hasPendingUserInput,
+    interactionMode: thread.interactionMode,
+  };
+
+  const sessions = thread.sessions;
+  if (sessions && sessions.length > 0) {
+    return combineStatusPills(
+      sessions.map((session) => {
+        const key = sessionKeyOf(session);
+        const sessionLastVisitedAt = thread.sessionLastVisitedAtById?.[key] ?? thread.lastVisitedAt;
+        return resolveSessionStatusPill({
+          session,
+          latestTurn: session.latestTurn ?? thread.latestTurn,
+          flags,
+          lastVisitedAt: sessionLastVisitedAt,
+        });
+      }),
+    );
+  }
+
+  return resolveSessionStatusPill({
+    session: thread.session,
+    latestTurn: thread.latestTurn,
+    flags,
+    lastVisitedAt: thread.lastVisitedAt,
+  });
+}
+
 export function resolveProjectStatusIndicator(
   statuses: ReadonlyArray<ThreadStatusPill | null>,
 ): ThreadStatusPill | null {
-  let highestPriorityStatus: ThreadStatusPill | null = null;
-
-  for (const status of statuses) {
-    if (status === null) continue;
-    if (
-      highestPriorityStatus === null ||
-      THREAD_STATUS_PRIORITY[status.label] > THREAD_STATUS_PRIORITY[highestPriorityStatus.label]
-    ) {
-      highestPriorityStatus = status;
-    }
-  }
-
-  return highestPriorityStatus;
+  return combineStatusPills(statuses);
 }
 
 export function getVisibleThreadsForProject<T extends Pick<Thread, "id">>(input: {

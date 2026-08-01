@@ -21,6 +21,7 @@ export interface PersistedUiState {
   projectExpandedById?: Record<string, boolean>;
   projectOrder?: string[];
   threadLastVisitedAtById?: Record<string, string>;
+  sessionLastVisitedAtById?: Record<string, string>;
   collapsedProjectCwds?: string[];
   expandedProjectCwds?: string[];
   projectOrderCwds?: string[];
@@ -36,6 +37,10 @@ export interface UiProjectState {
 
 export interface UiThreadState {
   threadLastVisitedAtById: Record<string, string>;
+  // Per-session last-visited, keyed by a scoped `(threadId, sessionId)` key. Drives
+  // the per-session "unseen completion" that makes a thread's Completed attention
+  // transient: consulting a session's tab clears its contribution.
+  sessionLastVisitedAtById: Record<string, string>;
   threadChangedFilesExpandedById: Record<string, Record<string, boolean>>;
 }
 
@@ -49,6 +54,7 @@ const initialState: UiState = {
   projectExpandedById: {},
   projectOrder: [],
   threadLastVisitedAtById: {},
+  sessionLastVisitedAtById: {},
   threadChangedFilesExpandedById: {},
   defaultAdvertisedEndpointKey: null,
 };
@@ -126,6 +132,7 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
     projectExpandedById,
     projectOrder,
     threadLastVisitedAtById: sanitizeTimestampRecord(parsed.threadLastVisitedAtById),
+    sessionLastVisitedAtById: sanitizeTimestampRecord(parsed.sessionLastVisitedAtById),
     threadChangedFilesExpandedById:
       parsed.threadChangedFilesExpansionVersion === THREAD_CHANGED_FILES_EXPANSION_VERSION
         ? sanitizePersistedThreadChangedFilesExpanded(parsed.threadChangedFilesExpandedById)
@@ -204,6 +211,7 @@ export function persistState(state: UiState): void {
         projectExpandedById,
         projectOrder: state.projectOrder,
         threadLastVisitedAtById: state.threadLastVisitedAtById,
+        sessionLastVisitedAtById: state.sessionLastVisitedAtById,
         defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
         threadChangedFilesExpansionVersion: THREAD_CHANGED_FILES_EXPANSION_VERSION,
         threadChangedFilesExpandedById: state.threadChangedFilesExpandedById,
@@ -241,6 +249,29 @@ export function markThreadVisited(state: UiState, threadId: string, visitedAt: s
     threadLastVisitedAtById: {
       ...state.threadLastVisitedAtById,
       [threadId]: visitedAt,
+    },
+  };
+}
+
+export function markSessionVisited(state: UiState, sessionKey: string, visitedAt: string): UiState {
+  const visitedAtMs = Date.parse(visitedAt);
+  if (!Number.isFinite(visitedAtMs)) {
+    return state;
+  }
+  const previousVisitedAt = state.sessionLastVisitedAtById[sessionKey];
+  const previousVisitedAtMs = previousVisitedAt ? Date.parse(previousVisitedAt) : NaN;
+  if (
+    Number.isFinite(previousVisitedAtMs) &&
+    Number.isFinite(visitedAtMs) &&
+    previousVisitedAtMs >= visitedAtMs
+  ) {
+    return state;
+  }
+  return {
+    ...state,
+    sessionLastVisitedAtById: {
+      ...state.sessionLastVisitedAtById,
+      [sessionKey]: visitedAt,
     },
   };
 }
@@ -383,6 +414,7 @@ export function reorderProjects(
 
 interface UiStateStore extends UiState {
   markThreadVisited: (threadId: string, visitedAt: string) => void;
+  markSessionVisited: (sessionKey: string, visitedAt: string) => void;
   markThreadUnread: (threadId: string, latestTurnCompletedAt: string | null | undefined) => void;
   setThreadChangedFilesExpanded: (threadId: string, turnId: string, expanded: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
@@ -398,6 +430,8 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   ...readPersistedState(),
   markThreadVisited: (threadId, visitedAt) =>
     set((state) => markThreadVisited(state, threadId, visitedAt)),
+  markSessionVisited: (sessionKey, visitedAt) =>
+    set((state) => markSessionVisited(state, sessionKey, visitedAt)),
   markThreadUnread: (threadId, latestTurnCompletedAt) =>
     set((state) => markThreadUnread(state, threadId, latestTurnCompletedAt)),
   setThreadChangedFilesExpanded: (threadId, turnId, expanded) =>

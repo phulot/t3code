@@ -99,6 +99,19 @@ describe("orchestration projector", () => {
         activities: [],
         checkpoints: [],
         session: null,
+        sessions: [
+          {
+            threadId: "thread-1",
+            sessionId: "default",
+            status: "idle",
+            providerName: null,
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            latestTurn: null,
+            updatedAt: now,
+          },
+        ],
       },
     ]);
   });

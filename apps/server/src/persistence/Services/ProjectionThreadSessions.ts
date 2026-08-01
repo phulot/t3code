@@ -11,6 +11,7 @@ import {
   IsoDateTime,
   OrchestrationSessionStatus,
   ProviderInstanceId,
+  SessionId,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -23,6 +24,12 @@ import type { ProjectionRepositoryError } from "../Errors.ts";
 
 export const ProjectionThreadSession = Schema.Struct({
   threadId: ThreadId,
+  /**
+   * Session (chat) this row belongs to within the thread. Optional for
+   * backward compatibility: callers that omit it operate on the thread's
+   * single `'default'` session. New session-aware callers set it explicitly.
+   */
+  sessionId: Schema.optional(SessionId),
   status: OrchestrationSessionStatus,
   providerName: Schema.NullOr(Schema.String),
   providerInstanceId: Schema.NullOr(ProviderInstanceId),
@@ -43,6 +50,19 @@ export const DeleteProjectionThreadSessionInput = Schema.Struct({
 });
 export type DeleteProjectionThreadSessionInput = typeof DeleteProjectionThreadSessionInput.Type;
 
+export const GetProjectionThreadSessionBySessionInput = Schema.Struct({
+  threadId: ThreadId,
+  sessionId: SessionId,
+});
+export type GetProjectionThreadSessionBySessionInput =
+  typeof GetProjectionThreadSessionBySessionInput.Type;
+
+export const ListProjectionThreadSessionsByThreadInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type ListProjectionThreadSessionsByThreadInput =
+  typeof ListProjectionThreadSessionsByThreadInput.Type;
+
 /**
  * ProjectionThreadSessionRepositoryShape - Service API for projected thread sessions.
  */
@@ -56,10 +76,26 @@ export interface ProjectionThreadSessionRepositoryShape {
 
   /**
    * Read projected thread-session state by thread id.
+   *
+   * Resolves the thread's `'default'` session for backward compatibility.
    */
   readonly getByThreadId: (
     input: GetProjectionThreadSessionInput,
   ) => Effect.Effect<Option.Option<ProjectionThreadSession>, ProjectionRepositoryError>;
+
+  /**
+   * Read projected thread-session state by (thread id, session id).
+   */
+  readonly getByThreadAndSession: (
+    input: GetProjectionThreadSessionBySessionInput,
+  ) => Effect.Effect<Option.Option<ProjectionThreadSession>, ProjectionRepositoryError>;
+
+  /**
+   * List all projected sessions hosted by a thread, in ascending session id order.
+   */
+  readonly listByThreadId: (
+    input: ListProjectionThreadSessionsByThreadInput,
+  ) => Effect.Effect<ReadonlyArray<ProjectionThreadSession>, ProjectionRepositoryError>;
 
   /**
    * Delete projected thread-session state by thread id.

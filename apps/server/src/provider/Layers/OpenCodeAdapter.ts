@@ -1,4 +1,5 @@
 import {
+  DEFAULT_SESSION_ID,
   EventId,
   type OpenCodeSettings,
   ProviderDriverKind,
@@ -7,6 +8,8 @@ import {
   type ProviderSession,
   RuntimeItemId,
   RuntimeRequestId,
+  type SessionId,
+  stampOwningSessionId,
   ThreadId,
   type ToolLifecycleItemType,
   TurnId,
@@ -204,8 +207,19 @@ function openCodeEventSessionTitle(event: OpenCodeSubscribedEvent): string | und
   return trimText(event.properties.info.title);
 }
 
+/**
+ * Composite key for the per-session state map. Same-thread/different-session
+ * `startSession` calls must resolve to independent contexts; an omitted
+ * `sessionId` collapses to {@link DEFAULT_SESSION_ID} so legacy single-session
+ * behavior is byte-identical. Shared by the adapter and the module-level
+ * `ensureSessionContext` helper so both sides key consistently.
+ */
+const sessionKey = (threadId: ThreadId, sessionId: SessionId = DEFAULT_SESSION_ID): string =>
+  `${threadId} ${sessionId}`;
+
 interface OpenCodeSessionContext {
   session: ProviderSession;
+  readonly sessionId: SessionId;
   readonly client: OpencodeClient;
   readonly server: OpenCodeServerConnection;
   readonly directory: string;
@@ -368,10 +382,11 @@ function appendTurnItem(
 }
 
 const ensureSessionContext = Effect.fn("ensureSessionContext")(function* (
-  sessions: ReadonlyMap<ThreadId, OpenCodeSessionContext>,
+  sessions: ReadonlyMap<string, OpenCodeSessionContext>,
   threadId: ThreadId,
+  sessionId?: SessionId,
 ) {
-  const session = sessions.get(threadId);
+  const session = sessions.get(sessionKey(threadId, sessionId));
   if (!session) {
     return yield* new ProviderAdapterSessionNotFoundError({
       provider: PROVIDER,
@@ -585,7 +600,7 @@ export function makeOpenCodeAdapter(
     const managedNativeEventLogger =
       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
     const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
-    const sessions = new Map<ThreadId, OpenCodeSessionContext>();
+    const sessions = new Map<string, OpenCodeSessionContext>();
     const randomUUIDv4 = crypto.randomUUIDv4.pipe(
       Effect.mapError(
         (cause) =>
@@ -649,8 +664,10 @@ export function makeOpenCodeAdapter(
       }).pipe(Effect.ensuring(Queue.shutdown(runtimeEvents))),
     );
 
-    const emit = (event: ProviderRuntimeEvent) =>
-      Queue.offer(runtimeEvents, event).pipe(Effect.asVoid);
+    const emit = (context: OpenCodeSessionContext, event: ProviderRuntimeEvent) =>
+      Queue.offer(runtimeEvents, stampOwningSessionId(context.sessionId, event)).pipe(
+        Effect.asVoid,
+      );
     const writeNativeEvent = (
       threadId: ThreadId,
       event: {
@@ -678,12 +695,12 @@ export function makeOpenCodeAdapter(
         return;
       }
       const turnId = context.activeTurnId;
-      sessions.delete(context.session.threadId);
+      sessions.delete(sessionKey(context.session.threadId, context.sessionId));
       // Emit lifecycle events BEFORE tearing down the scope. Both call sites
       // run this inside a fiber forked via `Effect.forkIn(context.sessionScope)`;
       // closing that scope triggers the fiber-interrupt finalizer, so any
       // subsequent yield point would unwind and silently drop these emits.
-      yield* emit({
+      yield* emit(context, {
         ...(yield* buildEventBase({
           threadId: context.session.threadId,
           turnId,
@@ -694,7 +711,7 @@ export function makeOpenCodeAdapter(
           class: "transport_error",
         },
       }).pipe(Effect.ignore);
-      yield* emit({
+      yield* emit(context, {
         ...(yield* buildEventBase({
           threadId: context.session.threadId,
           turnId,
@@ -738,7 +755,7 @@ export function makeOpenCodeAdapter(
         );
       }
       if (deltaToEmit.length > 0) {
-        yield* emit({
+        yield* emit(context, {
           ...(yield* buildEventBase({
             threadId: context.session.threadId,
             turnId,
@@ -763,7 +780,7 @@ export function makeOpenCodeAdapter(
         !context.completedAssistantPartIds.has(part.id)
       ) {
         context.completedAssistantPartIds.add(part.id);
-        yield* emit({
+        yield* emit(context, {
           ...(yield* buildEventBase({
             threadId: context.session.threadId,
             turnId,
@@ -808,7 +825,7 @@ export function makeOpenCodeAdapter(
         case "session.updated": {
           const title = openCodeEventSessionTitle(event);
           if (title) {
-            yield* emit({
+            yield* emit(context, {
               ...(yield* buildEventBase({
                 threadId: context.session.threadId,
                 raw: event,
@@ -872,7 +889,7 @@ export function makeOpenCodeAdapter(
               text: nextText,
             });
           }
-          yield* emit({
+          yield* emit(context, {
             ...(yield* buildEventBase({
               threadId: context.session.threadId,
               turnId,
@@ -933,14 +950,14 @@ export function makeOpenCodeAdapter(
               payload,
             };
             appendTurnItem(context, turnId, part);
-            yield* emit(runtimeEvent);
+            yield* emit(context, runtimeEvent);
           }
           break;
         }
 
         case "permission.asked": {
           context.pendingPermissions.set(event.properties.id, event.properties);
-          yield* emit({
+          yield* emit(context, {
             ...(yield* buildEventBase({
               threadId: context.session.threadId,
               turnId,
@@ -962,7 +979,7 @@ export function makeOpenCodeAdapter(
 
         case "permission.replied": {
           context.pendingPermissions.delete(event.properties.requestID);
-          yield* emit({
+          yield* emit(context, {
             ...(yield* buildEventBase({
               threadId: context.session.threadId,
               turnId,
@@ -980,7 +997,7 @@ export function makeOpenCodeAdapter(
 
         case "question.asked": {
           context.pendingQuestions.set(event.properties.id, event.properties);
-          yield* emit({
+          yield* emit(context, {
             ...(yield* buildEventBase({
               threadId: context.session.threadId,
               turnId,
@@ -1004,7 +1021,7 @@ export function makeOpenCodeAdapter(
               event.properties.answers[index]?.join(", ") ?? "",
             ]),
           );
-          yield* emit({
+          yield* emit(context, {
             ...(yield* buildEventBase({
               threadId: context.session.threadId,
               turnId,
@@ -1019,7 +1036,7 @@ export function makeOpenCodeAdapter(
 
         case "question.rejected": {
           context.pendingQuestions.delete(event.properties.requestID);
-          yield* emit({
+          yield* emit(context, {
             ...(yield* buildEventBase({
               threadId: context.session.threadId,
               turnId,
@@ -1041,7 +1058,7 @@ export function makeOpenCodeAdapter(
           }
 
           if (event.properties.status.type === "retry") {
-            yield* emit({
+            yield* emit(context, {
               ...(yield* buildEventBase({
                 threadId: context.session.threadId,
                 turnId,
@@ -1059,7 +1076,7 @@ export function makeOpenCodeAdapter(
           if (event.properties.status.type === "idle" && turnId) {
             context.activeTurnId = undefined;
             yield* updateProviderSession(context, { status: "ready" }, { clearActiveTurnId: true });
-            yield* emit({
+            yield* emit(context, {
               ...(yield* buildEventBase({
                 threadId: context.session.threadId,
                 turnId,
@@ -1087,7 +1104,7 @@ export function makeOpenCodeAdapter(
             { clearActiveTurnId: true },
           );
           if (activeTurnId) {
-            yield* emit({
+            yield* emit(context, {
               ...(yield* buildEventBase({
                 threadId: context.session.threadId,
                 turnId: activeTurnId,
@@ -1100,7 +1117,7 @@ export function makeOpenCodeAdapter(
               },
             });
           }
-          yield* emit({
+          yield* emit(context, {
             ...(yield* buildEventBase({
               threadId: context.session.threadId,
               raw: event,
@@ -1191,10 +1208,10 @@ export function makeOpenCodeAdapter(
         const serverPassword = openCodeSettings.serverPassword;
         const directory = input.cwd ?? serverConfig.cwd;
         const resumeSessionId = parseOpenCodeResume(input.resumeCursor)?.sessionId;
-        const existing = sessions.get(input.threadId);
+        const existing = sessions.get(sessionKey(input.threadId, input.sessionId));
         if (existing) {
           yield* stopOpenCodeContext(existing);
-          sessions.delete(input.threadId);
+          sessions.delete(sessionKey(input.threadId, input.sessionId));
         }
 
         const started = yield* Effect.gen(function* () {
@@ -1332,7 +1349,7 @@ export function makeOpenCodeAdapter(
 
         // Guard against a concurrent startSession call that may have raced
         // and already inserted a session while we were awaiting async work.
-        const raceWinner = sessions.get(input.threadId);
+        const raceWinner = sessions.get(sessionKey(input.threadId, input.sessionId));
         if (raceWinner) {
           // Another call won the race — clean up. Only abort the remote
           // session if we created it here; a resumed one is shared upstream
@@ -1370,6 +1387,7 @@ export function makeOpenCodeAdapter(
 
         const context: OpenCodeSessionContext = {
           session,
+          sessionId: input.sessionId ?? DEFAULT_SESSION_ID,
           client: started.client,
           server: started.server,
           directory,
@@ -1387,17 +1405,17 @@ export function makeOpenCodeAdapter(
           stopped: yield* Ref.make(false),
           sessionScope: started.sessionScope,
         };
-        sessions.set(input.threadId, context);
+        sessions.set(sessionKey(input.threadId, input.sessionId), context);
         yield* startEventPump(context);
 
-        yield* emit({
+        yield* emit(context, {
           ...(yield* buildEventBase({ threadId: input.threadId })),
           type: "session.started",
           payload: {
             message: "OpenCode session started",
           },
         });
-        yield* emit({
+        yield* emit(context, {
           ...(yield* buildEventBase({ threadId: input.threadId })),
           type: "thread.started",
           payload: {
@@ -1410,7 +1428,7 @@ export function makeOpenCodeAdapter(
     );
 
     const sendTurn: OpenCodeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-      const context = yield* ensureSessionContext(sessions, input.threadId);
+      const context = yield* ensureSessionContext(sessions, input.threadId, input.sessionId);
       // A sendTurn while a turn is active is a steer: OpenCode queues the
       // prompt into the busy session and the work continues as one turn, so
       // the active turn id is reused instead of opening a new turn.
@@ -1471,7 +1489,7 @@ export function makeOpenCodeAdapter(
       );
 
       if (steeringTurnId === undefined) {
-        yield* emit({
+        yield* emit(context, {
           ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
           type: "turn.started",
           payload: {
@@ -1512,7 +1530,7 @@ export function makeOpenCodeAdapter(
                   },
                   { clearActiveTurnId: true },
                 );
-                yield* emit({
+                yield* emit(context, {
                   ...(yield* buildEventBase({
                     threadId: input.threadId,
                     turnId,
@@ -1538,13 +1556,13 @@ export function makeOpenCodeAdapter(
     });
 
     const interruptTurn: OpenCodeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
-      function* (threadId, turnId) {
-        const context = yield* ensureSessionContext(sessions, threadId);
+      function* (threadId, turnId, sessionId) {
+        const context = yield* ensureSessionContext(sessions, threadId, sessionId);
         yield* runOpenCodeSdk("session.abort", () =>
           context.client.session.abort({ sessionID: context.openCodeSessionId }),
         ).pipe(Effect.mapError(toRequestError));
         if (turnId ?? context.activeTurnId) {
-          yield* emit({
+          yield* emit(context, {
             ...(yield* buildEventBase({
               threadId,
               turnId: turnId ?? context.activeTurnId,
@@ -1560,8 +1578,8 @@ export function makeOpenCodeAdapter(
 
     const respondToRequest: OpenCodeAdapterShape["respondToRequest"] = Effect.fn(
       "respondToRequest",
-    )(function* (threadId, requestId, decision) {
-      const context = yield* ensureSessionContext(sessions, threadId);
+    )(function* (threadId, requestId, decision, sessionId) {
+      const context = yield* ensureSessionContext(sessions, threadId, sessionId);
       if (!context.pendingPermissions.has(requestId)) {
         return yield* new ProviderAdapterRequestError({
           provider: PROVIDER,
@@ -1580,8 +1598,8 @@ export function makeOpenCodeAdapter(
 
     const respondToUserInput: OpenCodeAdapterShape["respondToUserInput"] = Effect.fn(
       "respondToUserInput",
-    )(function* (threadId, requestId, answers) {
-      const context = yield* ensureSessionContext(sessions, threadId);
+    )(function* (threadId, requestId, answers, sessionId) {
+      const context = yield* ensureSessionContext(sessions, threadId, sessionId);
       const request = context.pendingQuestions.get(requestId);
       if (!request) {
         return yield* new ProviderAdapterRequestError({
@@ -1600,8 +1618,8 @@ export function makeOpenCodeAdapter(
     });
 
     const stopSession: OpenCodeAdapterShape["stopSession"] = Effect.fn("stopSession")(
-      function* (threadId) {
-        const context = sessions.get(threadId);
+      function* (threadId, sessionId) {
+        const context = sessions.get(sessionKey(threadId, sessionId));
         if (!context) {
           return yield* new ProviderAdapterSessionNotFoundError({
             provider: PROVIDER,
@@ -1609,11 +1627,11 @@ export function makeOpenCodeAdapter(
           });
         }
         const stopped = yield* stopOpenCodeContext(context);
-        sessions.delete(threadId);
+        sessions.delete(sessionKey(threadId, sessionId));
         if (!stopped) {
           return;
         }
-        yield* emit({
+        yield* emit(context, {
           ...(yield* buildEventBase({ threadId })),
           type: "session.exited",
           payload: {
@@ -1628,12 +1646,12 @@ export function makeOpenCodeAdapter(
     const listSessions: OpenCodeAdapterShape["listSessions"] = () =>
       Effect.sync(() => [...sessions.values()].map((context) => context.session));
 
-    const hasSession: OpenCodeAdapterShape["hasSession"] = (threadId) =>
-      Effect.sync(() => sessions.has(threadId));
+    const hasSession: OpenCodeAdapterShape["hasSession"] = (threadId, sessionId) =>
+      Effect.sync(() => sessions.has(sessionKey(threadId, sessionId)));
 
     const readThread: OpenCodeAdapterShape["readThread"] = Effect.fn("readThread")(
-      function* (threadId) {
-        const context = yield* ensureSessionContext(sessions, threadId);
+      function* (threadId, sessionId) {
+        const context = yield* ensureSessionContext(sessions, threadId, sessionId);
         const messages = yield* runOpenCodeSdk("session.messages", () =>
           context.client.session.messages({
             sessionID: context.openCodeSessionId,
@@ -1658,8 +1676,8 @@ export function makeOpenCodeAdapter(
     );
 
     const rollbackThread: OpenCodeAdapterShape["rollbackThread"] = Effect.fn("rollbackThread")(
-      function* (threadId, numTurns) {
-        const context = yield* ensureSessionContext(sessions, threadId);
+      function* (threadId, numTurns, sessionId) {
+        const context = yield* ensureSessionContext(sessions, threadId, sessionId);
         const messages = yield* runOpenCodeSdk("session.messages", () =>
           context.client.session.messages({
             sessionID: context.openCodeSessionId,
@@ -1678,7 +1696,7 @@ export function makeOpenCodeAdapter(
           }),
         ).pipe(Effect.mapError(toRequestError));
 
-        return yield* readThread(threadId);
+        return yield* readThread(threadId, sessionId);
       },
     );
 

@@ -1,4 +1,10 @@
-import { defaultInstanceIdForDriver, ProviderDriverKind, type ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_SESSION_ID,
+  defaultInstanceIdForDriver,
+  ProviderDriverKind,
+  type SessionId,
+  type ThreadId,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -66,6 +72,7 @@ function toRuntimeBinding(
       (provider) =>
         ({
           threadId: runtime.threadId,
+          sessionId: runtime.sessionId ?? DEFAULT_SESSION_ID,
           provider,
           // Migration boundary only: rows written before the instance split
           // have a null provider_instance_id. Promote them as they leave
@@ -86,9 +93,14 @@ function toRuntimeBinding(
 const makeProviderSessionDirectory = Effect.gen(function* () {
   const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
 
-  const getBinding = (threadId: ThreadId) =>
-    repository.getByThreadId({ threadId }).pipe(
-      Effect.mapError(toPersistenceError("ProviderSessionDirectory.getBinding:getByThreadId")),
+  const readRuntime = (threadId: ThreadId, sessionId: SessionId | undefined, operation: string) =>
+    (sessionId === undefined
+      ? repository.getByThreadId({ threadId })
+      : repository.getByThreadAndSession({ threadId, sessionId })
+    ).pipe(Effect.mapError(toPersistenceError(operation)));
+
+  const getBinding = (threadId: ThreadId, sessionId?: SessionId) =>
+    readRuntime(threadId, sessionId, "ProviderSessionDirectory.getBinding:read").pipe(
       Effect.flatMap((runtime) =>
         Option.match(runtime, {
           onNone: () => Effect.succeed(Option.none<ProviderRuntimeBinding>()),
@@ -101,9 +113,11 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
     );
 
   const upsert: ProviderSessionDirectoryShape["upsert"] = Effect.fn(function* (binding) {
-    const existing = yield* repository
-      .getByThreadId({ threadId: binding.threadId })
-      .pipe(Effect.mapError(toPersistenceError("ProviderSessionDirectory.upsert:getByThreadId")));
+    const existing = yield* readRuntime(
+      binding.threadId,
+      binding.sessionId,
+      "ProviderSessionDirectory.upsert:read",
+    );
 
     const existingRuntime = Option.getOrUndefined(existing);
     const resolvedThreadId = binding.threadId ?? existingRuntime?.threadId;
@@ -128,6 +142,7 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
     yield* repository
       .upsert({
         threadId: resolvedThreadId,
+        sessionId: binding.sessionId ?? existingRuntime?.sessionId ?? DEFAULT_SESSION_ID,
         providerName: binding.provider,
         providerInstanceId,
         adapterKey:
@@ -148,8 +163,8 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
       .pipe(Effect.mapError(toPersistenceError("ProviderSessionDirectory.upsert:upsert")));
   });
 
-  const getProvider: ProviderSessionDirectoryShape["getProvider"] = (threadId) =>
-    getBinding(threadId).pipe(
+  const getProvider: ProviderSessionDirectoryShape["getProvider"] = (threadId, sessionId) =>
+    getBinding(threadId, sessionId).pipe(
       Effect.flatMap((binding) =>
         Option.match(binding, {
           onSome: (value) => Effect.succeed(value.provider),
@@ -170,6 +185,18 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
       Effect.map((rows) => rows.map((row) => row.threadId)),
     );
 
+  const listByThreadId: ProviderSessionDirectoryShape["listByThreadId"] = (threadId) =>
+    repository.listByThreadId({ threadId }).pipe(
+      Effect.mapError(toPersistenceError("ProviderSessionDirectory.listByThreadId:listByThreadId")),
+      Effect.flatMap((rows) =>
+        Effect.forEach(
+          rows,
+          (row) => toRuntimeBinding(row, "ProviderSessionDirectory.listByThreadId"),
+          { concurrency: "unbounded" },
+        ),
+      ),
+    );
+
   const listBindings: ProviderSessionDirectoryShape["listBindings"] = () =>
     repository.list().pipe(
       Effect.mapError(toPersistenceError("ProviderSessionDirectory.listBindings:list")),
@@ -186,6 +213,7 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
     upsert,
     getProvider,
     getBinding,
+    listByThreadId,
     listThreadIds,
     listBindings,
   } satisfies ProviderSessionDirectoryShape;

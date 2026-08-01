@@ -43,6 +43,14 @@ export const MessageId = makeEntityId("MessageId");
 export type MessageId = typeof MessageId.Type;
 export const TurnId = makeEntityId("TurnId");
 export type TurnId = typeof TurnId.Type;
+export const SessionId = makeEntityId("SessionId");
+export type SessionId = typeof SessionId.Type;
+/**
+ * Canonical session for a thread when no explicit session id is supplied.
+ * Legacy/absent session ids always map to this literal so single-session
+ * behavior stays byte-identical while multi-session support rolls out.
+ */
+export const DEFAULT_SESSION_ID = SessionId.make("default");
 export const AuthSessionId = makeEntityId("AuthSessionId");
 export type AuthSessionId = typeof AuthSessionId.Type;
 export const RpcClientId = NonNegativeInt.pipe(Schema.brand("RpcClientId"));

@@ -46,6 +46,7 @@ import {
 } from "../terminal/terminalLaunchContext";
 import { terminalDebugLog } from "../terminal/terminalDebugLog";
 import { ThreadDetailScreen } from "./ThreadDetailScreen";
+import { sessionIdOf } from "./threadPresentation";
 import {
   ThreadGitControls,
   useThreadGitCenterHeaderItems,
@@ -99,6 +100,7 @@ function OpeningThreadLoadingScreen() {
 type ThreadRouteScreenRouteProps = StaticScreenProps<{
   readonly environmentId: string;
   readonly threadId: string;
+  readonly sessionId?: string;
 }>;
 
 interface ThreadRouteScreenProps extends ThreadRouteScreenRouteProps {
@@ -186,8 +188,17 @@ function ThreadRouteContent(
   } = useAdaptiveWorkspaceLayout();
   const { connectionState } = useRemoteConnectionStatus();
   const { onReconnectEnvironment } = useRemoteConnections();
-  const { selectedThread, selectedThreadProject, selectedEnvironmentConnection } =
-    useThreadSelection();
+  const {
+    selectedThread,
+    selectedThreadProject,
+    selectedEnvironmentConnection,
+    sessions,
+    activeSessionId,
+    activeSession,
+  } = useThreadSelection();
+  const createThreadSession = useAtomCommand(threadEnvironment.createSession, {
+    reportFailure: false,
+  });
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
   const { selectedThreadCwd } = useSelectedThreadWorktree();
@@ -197,6 +208,18 @@ function ThreadRouteContent(
   const requests = useSelectedThreadRequests();
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, "thread interrupt");
   const navigation = useNavigation();
+  // `useNavigation()` resolves to the app-wide `never` ParamList (see the many
+  // pre-existing navigation typing errors), so `setParams` cannot see the Thread
+  // route's optional `sessionId`. Narrow just this write to keep it typed.
+  const setSessionParam = useCallback(
+    (sessionId: string) =>
+      (
+        navigation as unknown as {
+          setParams: (params: { sessionId: string }) => void;
+        }
+      ).setParams({ sessionId }),
+    [navigation],
+  );
   const params = props.route.params;
   const environmentIdRaw = firstRouteParam(params.environmentId);
   const environmentId = environmentIdRaw ? EnvironmentId.make(environmentIdRaw) : null;
@@ -460,24 +483,72 @@ function ThreadRouteContent(
   const handleOpenConnectionEditor = useCallback(() => {
     void navigation.navigate("Connections");
   }, [navigation]);
+  const isMultiSession = sessions.length > 1;
   const handleStopThread = useCallback(() => {
-    if (
-      !selectedThread ||
-      (selectedThread.session?.status !== "running" &&
-        selectedThread.session?.status !== "starting")
-    ) {
+    if (!selectedThread) {
+      return;
+    }
+    // Target the active session's own turn when the thread hosts multiple
+    // chats; legacy single-session threads keep using the scalar `session`.
+    const session = (isMultiSession ? activeSession : null) ?? selectedThread.session;
+    if (session?.status !== "running" && session?.status !== "starting") {
       return;
     }
     return interruptThreadTurn({
       environmentId: selectedThread.environmentId,
       input: {
         threadId: selectedThread.id,
-        ...(selectedThread.session.activeTurnId
-          ? { turnId: selectedThread.session.activeTurnId }
-          : {}),
+        ...(session.activeTurnId ? { turnId: session.activeTurnId } : {}),
+        ...(isMultiSession ? { sessionId: activeSessionId } : {}),
       },
     });
-  }, [interruptThreadTurn, selectedThread]);
+  }, [activeSession, activeSessionId, interruptThreadTurn, isMultiSession, selectedThread]);
+
+  const handleSelectSession = useCallback(
+    (sessionId: string) => {
+      setSessionParam(sessionId);
+    },
+    [setSessionParam],
+  );
+  // The create-session command acknowledges without echoing the new id, so
+  // (mirroring web) we flag a pending select and adopt whichever session id
+  // appears once the read-model catches up.
+  const pendingSelectNewSessionRef = useRef(false);
+  const knownSessionIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const sessionIdList = useMemo(
+    () => sessions.map((session) => String(sessionIdOf(session))),
+    [sessions],
+  );
+  const sessionIdKey = sessionIdList.join("|");
+  useEffect(() => {
+    if (!pendingSelectNewSessionRef.current) {
+      return;
+    }
+    const added = sessionIdList.find((id) => !knownSessionIdsRef.current.has(id));
+    if (added) {
+      pendingSelectNewSessionRef.current = false;
+      knownSessionIdsRef.current = new Set(sessionIdList);
+      setSessionParam(added);
+    }
+    // sessionIdKey stands in for the sessions list identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionIdKey, setSessionParam]);
+  const handleCreateSession = useCallback(async () => {
+    if (!selectedThread) {
+      return;
+    }
+    pendingSelectNewSessionRef.current = true;
+    knownSessionIdsRef.current = new Set(sessionIdList);
+    const result = await createThreadSession({
+      environmentId: selectedThread.environmentId,
+      input: { threadId: selectedThread.id },
+    });
+    if (result._tag === "Failure") {
+      pendingSelectNewSessionRef.current = false;
+    }
+    // sessionIdKey stands in for the sessions list identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createThreadSession, selectedThread, sessionIdKey]);
 
   const handleOpenTerminal = useCallback(
     (nextTerminalId?: string | null) => {
@@ -754,6 +825,10 @@ function ThreadRouteContent(
           screenTone={connectionTone(routeConnectionState)}
           connectionError={routeConnectionError}
           environmentLabel={selectedEnvironmentConnection?.environmentLabel ?? null}
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          onSelectSession={handleSelectSession}
+          onCreateSession={handleCreateSession}
           selectedThreadFeed={composer.selectedThreadFeed}
           activeWorkStartedAt={composer.activeWorkStartedAt}
           activePendingApproval={requests.activePendingApproval}

@@ -1438,6 +1438,14 @@ const make = Effect.gen(function* () {
             threadId: thread.id,
             session: {
               threadId: thread.id,
+              // Runtime events name their originating session (defaulting to
+              // the thread's default session on legacy payloads); prefer that
+              // over the previously-recorded read-model session id.
+              ...(event.sessionId !== undefined
+                ? { sessionId: event.sessionId }
+                : thread.session?.sessionId !== undefined
+                  ? { sessionId: thread.session.sessionId }
+                  : {}),
               status,
               providerName: event.provider,
               ...(event.providerInstanceId !== undefined
@@ -1688,6 +1696,9 @@ const make = Effect.gen(function* () {
             threadId: thread.id,
             session: {
               threadId: thread.id,
+              ...(thread.session?.sessionId !== undefined
+                ? { sessionId: thread.session.sessionId }
+                : {}),
               status: "error",
               providerName: event.provider,
               ...(event.providerInstanceId !== undefined

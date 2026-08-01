@@ -27,6 +27,7 @@ import {
   type OrchestrationThreadShell,
   ModelSelection,
   ProjectId,
+  SessionId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
@@ -236,6 +237,7 @@ function mapSessionRow(
 ): OrchestrationSession {
   return {
     threadId: row.threadId,
+    ...(row.sessionId !== undefined ? { sessionId: row.sessionId } : {}),
     status: row.status,
     providerName: row.providerName,
     ...(row.providerInstanceId !== null ? { providerInstanceId: row.providerInstanceId } : {}),
@@ -244,6 +246,56 @@ function mapSessionRow(
     lastError: row.lastError,
     updatedAt: row.updatedAt,
   };
+}
+
+/**
+ * Literal session id for the thread's single legacy/default chat. Threads with
+ * no persisted session row synthesize an idle `default` session so that
+ * `thread.sessions[]` always has at least one entry.
+ */
+const SNAPSHOT_DEFAULT_SESSION_ID = "default";
+
+/**
+ * Synthesize the idle `default` session for a thread that has no persisted
+ * session row yet (legacy threads created before per-session projection). Keeps
+ * the `sessions[]` array non-empty without changing the scalar `session` compat
+ * field, which stays `null` in that case.
+ */
+function synthesizeDefaultSession(threadRow: {
+  readonly threadId: OrchestrationSession["threadId"];
+  readonly runtimeMode: OrchestrationSession["runtimeMode"];
+  readonly updatedAt: OrchestrationSession["updatedAt"];
+}): OrchestrationSession {
+  return {
+    threadId: threadRow.threadId,
+    sessionId: SessionId.make(SNAPSHOT_DEFAULT_SESSION_ID),
+    status: "idle",
+    providerName: null,
+    runtimeMode: threadRow.runtimeMode,
+    activeTurnId: null,
+    lastError: null,
+    updatedAt: threadRow.updatedAt,
+  };
+}
+
+/**
+ * Build the per-session `sessions[]` collection for a thread from its persisted
+ * session rows. Guarantees at least one entry: when the thread has no session
+ * rows, an idle `default` session is synthesized. The scalar `session` field is
+ * derived separately and stays byte-identical for legacy single-session reads.
+ */
+function buildThreadSessions(
+  scalarSession: OrchestrationSession | null,
+  threadRow: {
+    readonly threadId: OrchestrationSession["threadId"];
+    readonly runtimeMode: OrchestrationSession["runtimeMode"];
+    readonly updatedAt: OrchestrationSession["updatedAt"];
+  },
+): ReadonlyArray<OrchestrationSession> {
+  if (scalarSession !== null) {
+    return [scalarSession];
+  }
+  return [synthesizeDefaultSession(threadRow)];
 }
 
 function mapProjectShellRow(
@@ -561,6 +613,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       sql`
         SELECT
           thread_id AS "threadId",
+          session_id AS "sessionId",
           status,
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
@@ -582,6 +635,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       sql`
         SELECT
           sessions.thread_id AS "threadId",
+          sessions.session_id AS "sessionId",
           sessions.status,
           sessions.provider_name AS "providerName",
           sessions.provider_instance_id AS "providerInstanceId",
@@ -607,6 +661,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       sql`
         SELECT
           sessions.thread_id AS "threadId",
+          sessions.session_id AS "sessionId",
           sessions.status,
           sessions.provider_name AS "providerName",
           sessions.provider_instance_id AS "providerInstanceId",
@@ -932,6 +987,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       sql`
         SELECT
           thread_id AS "threadId",
+          session_id AS "sessionId",
           status,
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
@@ -1235,18 +1291,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
               for (const row of sessionRows) {
                 updatedAt = maxIso(updatedAt, row.updatedAt);
-                sessionsByThread.set(row.threadId, {
-                  threadId: row.threadId,
-                  status: row.status,
-                  providerName: row.providerName,
-                  ...(row.providerInstanceId !== null
-                    ? { providerInstanceId: row.providerInstanceId }
-                    : {}),
-                  runtimeMode: row.runtimeMode,
-                  activeTurnId: row.activeTurnId,
-                  lastError: row.lastError,
-                  updatedAt: row.updatedAt,
-                });
+                sessionsByThread.set(row.threadId, mapSessionRow(row));
               }
 
               const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(
@@ -1290,6 +1335,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 activities: activitiesByThread.get(row.threadId) ?? [],
                 checkpoints: checkpointsByThread.get(row.threadId) ?? [],
                 session: sessionsByThread.get(row.threadId) ?? null,
+                sessions: buildThreadSessions(sessionsByThread.get(row.threadId) ?? null, row),
               }));
 
               const snapshot = {
@@ -1531,6 +1577,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   activities: [],
                   checkpoints: [],
                   session: sessionByThread.get(row.threadId) ?? null,
+                  sessions: buildThreadSessions(sessionByThread.get(row.threadId) ?? null, row),
                 });
               }
 
@@ -2185,6 +2232,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           completedAt: row.completedAt,
         })),
         session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
+        sessions: buildThreadSessions(
+          Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
+          threadRow.value,
+        ),
       };
 
       return Option.some(

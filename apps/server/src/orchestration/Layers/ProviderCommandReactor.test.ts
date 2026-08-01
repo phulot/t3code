@@ -18,6 +18,7 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  SessionId,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -544,6 +545,42 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("routes a non-default session turn to the named session process", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const sessionId = SessionId.make("session-b");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-session-b"),
+        threadId: ThreadId.make("thread-1"),
+        sessionId,
+        message: {
+          messageId: asMessageId("user-message-session-b"),
+          role: "user",
+          text: "hello session b",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    // start/sendTurn target the named session's process, not the default one.
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({ sessionId });
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ sessionId });
+
+    // The read model records the process under the named session, not "default".
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    const namedSession = thread?.sessions?.find((entry) => entry.sessionId === sessionId);
+    expect(namedSession?.status).toBe("starting");
   });
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>

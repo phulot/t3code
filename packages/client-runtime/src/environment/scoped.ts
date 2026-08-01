@@ -35,6 +35,13 @@ export function scopedThreadKey(ref: ScopedThreadRef): string {
   return scopedRefKey(ref);
 }
 
+// Globally-unique key for per-session seen/unseen markers: combines the scoped
+// thread key with the session id. The sidebar re-derives the bare sessionId
+// side to build its per-thread map (see sessionKeyOf in Sidebar.logic.ts).
+export function scopedSessionVisitKey(threadKey: string, sessionId: string): string {
+  return `${threadKey}::${sessionId}`;
+}
+
 function parseScopedKey(key: string): { environmentId: EnvironmentIdType; localId: string } | null {
   const separatorIndex = key.indexOf(":");
   if (separatorIndex <= 0 || separatorIndex >= key.length - 1) {

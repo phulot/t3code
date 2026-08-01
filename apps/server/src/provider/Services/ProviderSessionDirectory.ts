@@ -3,6 +3,7 @@ import type {
   ProviderDriverKind,
   ProviderSessionRuntimeStatus,
   RuntimeMode,
+  SessionId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -16,6 +17,11 @@ import type {
 
 export interface ProviderRuntimeBinding {
   readonly threadId: ThreadId;
+  /**
+   * Session (within the thread) this binding belongs to. Absent for legacy
+   * callers, which the directory resolves to the thread's default session.
+   */
+  readonly sessionId?: SessionId;
   readonly provider: ProviderDriverKind;
   /**
    * Routing key for the configured provider instance that owns this
@@ -47,11 +53,23 @@ export interface ProviderSessionDirectoryShape {
 
   readonly getProvider: (
     threadId: ThreadId,
+    sessionId?: SessionId,
   ) => Effect.Effect<ProviderDriverKind, ProviderSessionDirectoryReadError>;
 
   readonly getBinding: (
     threadId: ThreadId,
+    sessionId?: SessionId,
   ) => Effect.Effect<Option.Option<ProviderRuntimeBinding>, ProviderSessionDirectoryReadError>;
+
+  /**
+   * List every runtime binding recorded for a thread, one per session.
+   */
+  readonly listByThreadId: (
+    threadId: ThreadId,
+  ) => Effect.Effect<
+    ReadonlyArray<ProviderRuntimeBindingWithMetadata>,
+    ProviderSessionDirectoryPersistenceError
+  >;
 
   readonly listThreadIds: () => Effect.Effect<
     ReadonlyArray<ThreadId>,

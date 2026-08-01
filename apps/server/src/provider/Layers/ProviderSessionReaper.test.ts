@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  DEFAULT_SESSION_ID,
   ProjectId,
   ThreadId,
   TurnId,
@@ -267,7 +268,10 @@ describe("ProviderSessionReaper", () => {
 
     await waitFor(() => harness.stopSession.mock.calls.length === 1);
 
-    expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId });
+    expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({
+      threadId,
+      sessionId: DEFAULT_SESSION_ID,
+    });
     expect(harness.stoppedThreadIds.has(threadId)).toBe(true);
   });
 

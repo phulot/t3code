@@ -222,6 +222,7 @@ export function useThreadOutboxDrain(): void {
         input: {
           commandId: queuedMessage.commandId,
           threadId: queuedMessage.threadId,
+          ...(queuedMessage.sessionId ? { sessionId: queuedMessage.sessionId } : {}),
           message: {
             messageId: queuedMessage.messageId,
             role: "user",

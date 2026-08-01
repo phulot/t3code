@@ -9,7 +9,9 @@ import {
   ProjectId,
   ProviderInteractionMode,
   RuntimeMode,
+  SessionId,
   ThreadId,
+  type SessionId as SessionIdType,
   type ModelSelection as ModelSelectionType,
   type ProjectId as ProjectIdType,
   type ProviderInteractionMode as ProviderInteractionModeType,
@@ -44,6 +46,9 @@ export const QueuedThreadMessageSchema = Schema.Struct({
   commandId: CommandId,
   text: Schema.String,
   attachments: Schema.Array(DraftComposerImageAttachmentSchema),
+  // Target session (chat) for the turn. Absent means the default session, so
+  // legacy single-session queued messages behave exactly as before.
+  sessionId: Schema.optional(SessionId),
   modelSelection: Schema.optional(ModelSelection),
   runtimeMode: Schema.optional(RuntimeMode),
   interactionMode: Schema.optional(ProviderInteractionMode),
@@ -73,6 +78,7 @@ export interface QueuedThreadMessage {
   readonly commandId: CommandId;
   readonly text: string;
   readonly attachments: ReadonlyArray<DraftComposerImageAttachment>;
+  readonly sessionId?: SessionIdType;
   readonly modelSelection?: ModelSelectionType;
   readonly runtimeMode?: RuntimeModeType;
   readonly interactionMode?: ProviderInteractionModeType;

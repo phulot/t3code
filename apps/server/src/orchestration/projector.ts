@@ -9,6 +9,7 @@ import {
   OrchestrationMessage,
   OrchestrationSession,
   OrchestrationThread,
+  SessionId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -77,6 +78,83 @@ function settledTurnStateForSessionStatus(
     case "running":
       return null;
   }
+}
+
+// A thread always hosts at least one session; the implicit first one is the
+// "default" session, minted server-side. Legacy single-session threads and
+// payloads that arrive without a sessionId map onto it.
+const DEFAULT_SESSION_ID = "default";
+
+function sessionKey(session: { readonly sessionId?: string | undefined }): string {
+  return session.sessionId ?? DEFAULT_SESSION_ID;
+}
+
+/**
+ * Settle/advance the latest turn for a session-set, using the same rules as the
+ * thread-level fold. `prev` is the prior latest turn (thread-level or the
+ * session's own), so the helper serves both the scalar `latestTurn` and each
+ * per-session `latestTurn`.
+ */
+function settleSessionSetLatestTurn(
+  prev: OrchestrationThread["latestTurn"],
+  session: OrchestrationSession,
+): OrchestrationThread["latestTurn"] {
+  const settledTurnState = settledTurnStateForSessionStatus(session.status);
+  if (session.status === "running" && session.activeTurnId !== null) {
+    return {
+      turnId: session.activeTurnId,
+      state: "running",
+      requestedAt: prev?.turnId === session.activeTurnId ? prev.requestedAt : session.updatedAt,
+      startedAt:
+        prev?.turnId === session.activeTurnId
+          ? (prev.startedAt ?? session.updatedAt)
+          : session.updatedAt,
+      completedAt: null,
+      assistantMessageId: prev?.turnId === session.activeTurnId ? prev.assistantMessageId : null,
+    };
+  }
+  if (prev !== null && prev.state === "running" && settledTurnState !== null) {
+    return {
+      ...prev,
+      state: settledTurnState,
+      // A running turn's completedAt can only hold a mid-turn placeholder
+      // checkpoint timestamp — the session leaving "running" is the
+      // authoritative turn end.
+      completedAt: session.updatedAt,
+    };
+  }
+  return prev;
+}
+
+/** Upsert a session into a thread's `sessions[]` collection, keyed by sessionId. */
+function upsertThreadSession(
+  sessions: ReadonlyArray<OrchestrationSession> | undefined,
+  next: OrchestrationSession,
+): OrchestrationSession[] {
+  const key = sessionKey(next);
+  const existing = sessions ?? [];
+  return existing.some((entry) => sessionKey(entry) === key)
+    ? existing.map((entry) => (sessionKey(entry) === key ? next : entry))
+    : [...existing, next];
+}
+
+/**
+ * Recompute each session's `latestTurn` after a thread-level revert: a session's
+ * latest turn that pointed at a now-pruned turn is dropped. Reverts stay
+ * THREAD-level and global — this only prunes dangling per-session references.
+ */
+function retainSessionLatestTurnsAfterRevert(
+  sessions: ReadonlyArray<OrchestrationSession> | undefined,
+  retainedTurnIds: ReadonlySet<string>,
+): OrchestrationSession[] | undefined {
+  if (sessions === undefined) {
+    return undefined;
+  }
+  return sessions.map((session) =>
+    session.latestTurn != null && !retainedTurnIds.has(session.latestTurn.turnId)
+      ? { ...session, latestTurn: null }
+      : session,
+  );
 }
 
 function updateThread(
@@ -432,6 +510,22 @@ export function projectEvent(
             activities: [],
             checkpoints: [],
             session: null,
+            // Seed the implicit "default" session so the thread always hosts
+            // >=1 session in the read model. It stays idle until a provider
+            // session-set arrives (which upserts onto this same key).
+            sessions: [
+              {
+                threadId: payload.threadId,
+                sessionId: DEFAULT_SESSION_ID,
+                status: "idle",
+                providerName: null,
+                runtimeMode: payload.runtimeMode,
+                activeTurnId: null,
+                lastError: null,
+                latestTurn: null,
+                updatedAt: payload.createdAt,
+              },
+            ],
           },
           event.type,
           "thread",
@@ -595,6 +689,7 @@ export function projectEvent(
             ...(payload.attachments !== undefined ? { attachments: payload.attachments } : {}),
             turnId: payload.turnId,
             streaming: payload.streaming,
+            sessionId: payload.sessionId ?? DEFAULT_SESSION_ID,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
           },
@@ -647,51 +742,38 @@ export function projectEvent(
           return nextBase;
         }
 
-        const session: OrchestrationSession = yield* decodeForEvent(
+        const decodedSession: OrchestrationSession = yield* decodeForEvent(
           OrchestrationSession,
           payload.session,
           event.type,
           "session",
         );
 
-        // Leaving the "running" session status is the turn-end signal: settle
-        // a still-running latest turn so its duration reflects the whole turn.
-        const settledTurnState = settledTurnStateForSessionStatus(session.status);
+        const key = sessionKey(decodedSession);
+        const previousSession = (thread.sessions ?? []).find((entry) => sessionKey(entry) === key);
+
+        // Per-session latest turn folds against the session's own prior turn.
+        const nextSessionLatestTurn = settleSessionSetLatestTurn(
+          previousSession?.latestTurn ?? null,
+          decodedSession,
+        );
+        const session: OrchestrationSession = {
+          ...decodedSession,
+          sessionId: decodedSession.sessionId ?? SessionId.make(DEFAULT_SESSION_ID),
+          latestTurn: nextSessionLatestTurn,
+        };
+
+        // Thread-level latest turn stays the default/most-recently-active
+        // session's turn for backward compatibility. Leaving the "running"
+        // status is the turn-end signal.
+        const nextThreadLatestTurn = settleSessionSetLatestTurn(thread.latestTurn, decodedSession);
+
         return {
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             session,
-            latestTurn:
-              session.status === "running" && session.activeTurnId !== null
-                ? {
-                    turnId: session.activeTurnId,
-                    state: "running",
-                    requestedAt:
-                      thread.latestTurn?.turnId === session.activeTurnId
-                        ? thread.latestTurn.requestedAt
-                        : session.updatedAt,
-                    startedAt:
-                      thread.latestTurn?.turnId === session.activeTurnId
-                        ? (thread.latestTurn.startedAt ?? session.updatedAt)
-                        : session.updatedAt,
-                    completedAt: null,
-                    assistantMessageId:
-                      thread.latestTurn?.turnId === session.activeTurnId
-                        ? thread.latestTurn.assistantMessageId
-                        : null,
-                  }
-                : thread.latestTurn !== null &&
-                    thread.latestTurn.state === "running" &&
-                    settledTurnState !== null
-                  ? {
-                      ...thread.latestTurn,
-                      state: settledTurnState,
-                      // A running turn's completedAt can only hold a mid-turn
-                      // placeholder checkpoint timestamp — the session leaving
-                      // "running" is the authoritative turn end.
-                      completedAt: session.updatedAt,
-                    }
-                  : thread.latestTurn,
+            sessions: upsertThreadSession(thread.sessions, session),
+            latestTurn: nextThreadLatestTurn,
             updatedAt: event.occurredAt,
           }),
         };
@@ -779,26 +861,55 @@ export function projectEvent(
         const turnStillRunning =
           thread.session?.status === "running" && thread.session.activeTurnId === payload.turnId;
 
+        const nextLatestTurn: OrchestrationThread["latestTurn"] = turnStillRunning
+          ? thread.latestTurn
+          : {
+              turnId: payload.turnId,
+              state: checkpointStatusToLatestTurnState(payload.status),
+              requestedAt:
+                thread.latestTurn?.turnId === payload.turnId
+                  ? thread.latestTurn.requestedAt
+                  : payload.completedAt,
+              startedAt:
+                thread.latestTurn?.turnId === payload.turnId
+                  ? (thread.latestTurn.startedAt ?? payload.completedAt)
+                  : payload.completedAt,
+              completedAt: payload.completedAt,
+              assistantMessageId: payload.assistantMessageId,
+            };
+
+        // Turn-diff events do not carry a sessionId; mirror the computed turn
+        // onto the session that owns it (active or previously-latest), falling
+        // back to the default session so the per-session view stays consistent.
+        const sessions = thread.sessions;
+        const nextSessions =
+          sessions === undefined
+            ? undefined
+            : (() => {
+                let ownerIndex = sessions.findIndex(
+                  (entry) =>
+                    entry.activeTurnId === payload.turnId ||
+                    entry.latestTurn?.turnId === payload.turnId,
+                );
+                if (ownerIndex < 0) {
+                  ownerIndex = sessions.findIndex(
+                    (entry) => sessionKey(entry) === DEFAULT_SESSION_ID,
+                  );
+                }
+                if (ownerIndex < 0) {
+                  return sessions;
+                }
+                return sessions.map((entry, index) =>
+                  index === ownerIndex ? { ...entry, latestTurn: nextLatestTurn } : entry,
+                );
+              })();
+
         return {
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             checkpoints,
-            latestTurn: turnStillRunning
-              ? thread.latestTurn
-              : {
-                  turnId: payload.turnId,
-                  state: checkpointStatusToLatestTurnState(payload.status),
-                  requestedAt:
-                    thread.latestTurn?.turnId === payload.turnId
-                      ? thread.latestTurn.requestedAt
-                      : payload.completedAt,
-                  startedAt:
-                    thread.latestTurn?.turnId === payload.turnId
-                      ? (thread.latestTurn.startedAt ?? payload.completedAt)
-                      : payload.completedAt,
-                  completedAt: payload.completedAt,
-                  assistantMessageId: payload.assistantMessageId,
-                },
+            latestTurn: nextLatestTurn,
+            ...(nextSessions !== undefined ? { sessions: nextSessions } : {}),
             updatedAt: event.occurredAt,
           }),
         };
@@ -827,6 +938,7 @@ export function projectEvent(
             retainedTurnIds,
           ).slice(-200);
           const activities = retainThreadActivitiesAfterRevert(thread.activities, retainedTurnIds);
+          const sessions = retainSessionLatestTurnsAfterRevert(thread.sessions, retainedTurnIds);
 
           const latestCheckpoint = checkpoints.at(-1) ?? null;
           const latestTurn =
@@ -849,6 +961,7 @@ export function projectEvent(
               proposedPlans,
               activities,
               latestTurn,
+              ...(sessions !== undefined ? { sessions } : {}),
               updatedAt: event.occurredAt,
             }),
           };

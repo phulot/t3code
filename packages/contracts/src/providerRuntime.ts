@@ -9,6 +9,8 @@ import {
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
+  SessionId,
+  DEFAULT_SESSION_ID,
   ThreadId,
   TrimmedNonEmptyString,
   TurnId,
@@ -253,6 +255,12 @@ const ProviderRuntimeEventBase = Schema.Struct({
   // populates it (post-slice-4), routing flips to instance-id-only.
   providerInstanceId: Schema.optional(ProviderInstanceId),
   threadId: ThreadId,
+  // Names the session (within the thread) that produced this event. Absent on
+  // legacy/pre-multi-session payloads; decodes to DEFAULT_SESSION_ID so older
+  // events keep routing to the thread's single default session.
+  sessionId: Schema.optional(SessionId).pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SESSION_ID)),
+  ),
   createdAt: IsoDateTime,
   turnId: Schema.optional(TurnId),
   itemId: Schema.optional(RuntimeItemId),
@@ -1018,6 +1026,17 @@ export type ProviderRuntimeEventV2 = typeof ProviderRuntimeEventV2.Type;
 
 export const ProviderRuntimeEvent = ProviderRuntimeEventV2;
 export type ProviderRuntimeEvent = ProviderRuntimeEventV2;
+
+/**
+ * Stamp the owning session id onto a runtime event so it routes to the session
+ * that produced it. The default session is left implicit (field omitted) so
+ * legacy single-session payloads stay byte-identical and keep decoding to
+ * DEFAULT_SESSION_ID.
+ */
+export const stampOwningSessionId = (
+  sessionId: SessionId,
+  event: ProviderRuntimeEvent,
+): ProviderRuntimeEvent => (sessionId === DEFAULT_SESSION_ID ? event : { ...event, sessionId });
 
 // Compatibility aliases for call sites still importing legacy names.
 const ProviderRuntimeMessageDeltaEvent = ProviderRuntimeContentDeltaEvent;

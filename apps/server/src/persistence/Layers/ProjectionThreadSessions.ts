@@ -10,8 +10,16 @@ import {
   ProjectionThreadSessionRepository,
   type ProjectionThreadSessionRepositoryShape,
   DeleteProjectionThreadSessionInput,
+  GetProjectionThreadSessionBySessionInput,
   GetProjectionThreadSessionInput,
+  ListProjectionThreadSessionsByThreadInput,
 } from "../Services/ProjectionThreadSessions.ts";
+
+/**
+ * Literal session id for the thread's single legacy/default chat. Thread-keyed
+ * methods that omit a session id resolve to this session.
+ */
+const DEFAULT_SESSION_ID = "default";
 
 const makeProjectionThreadSessionRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -22,6 +30,7 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
       sql`
         INSERT INTO projection_thread_sessions (
           thread_id,
+          session_id,
           status,
           provider_name,
           provider_instance_id,
@@ -32,6 +41,7 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
         )
         VALUES (
           ${row.threadId},
+          ${row.sessionId ?? DEFAULT_SESSION_ID},
           ${row.status},
           ${row.providerName},
           ${row.providerInstanceId},
@@ -40,7 +50,7 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           ${row.lastError},
           ${row.updatedAt}
         )
-        ON CONFLICT (thread_id)
+        ON CONFLICT (thread_id, session_id)
         DO UPDATE SET
           status = excluded.status,
           provider_name = excluded.provider_name,
@@ -59,6 +69,7 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
       sql`
         SELECT
           thread_id AS "threadId",
+          session_id AS "sessionId",
           status,
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
@@ -68,6 +79,49 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           updated_at AS "updatedAt"
         FROM projection_thread_sessions
         WHERE thread_id = ${threadId}
+          AND session_id = ${DEFAULT_SESSION_ID}
+      `,
+  });
+
+  const getProjectionThreadSessionRowBySession = SqlSchema.findOneOption({
+    Request: GetProjectionThreadSessionBySessionInput,
+    Result: ProjectionThreadSession,
+    execute: ({ threadId, sessionId }) =>
+      sql`
+        SELECT
+          thread_id AS "threadId",
+          session_id AS "sessionId",
+          status,
+          provider_name AS "providerName",
+          provider_instance_id AS "providerInstanceId",
+          runtime_mode AS "runtimeMode",
+          active_turn_id AS "activeTurnId",
+          last_error AS "lastError",
+          updated_at AS "updatedAt"
+        FROM projection_thread_sessions
+        WHERE thread_id = ${threadId}
+          AND session_id = ${sessionId}
+      `,
+  });
+
+  const listProjectionThreadSessionRows = SqlSchema.findAll({
+    Request: ListProjectionThreadSessionsByThreadInput,
+    Result: ProjectionThreadSession,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          thread_id AS "threadId",
+          session_id AS "sessionId",
+          status,
+          provider_name AS "providerName",
+          provider_instance_id AS "providerInstanceId",
+          runtime_mode AS "runtimeMode",
+          active_turn_id AS "activeTurnId",
+          last_error AS "lastError",
+          updated_at AS "updatedAt"
+        FROM projection_thread_sessions
+        WHERE thread_id = ${threadId}
+        ORDER BY session_id ASC
       `,
   });
 
@@ -92,6 +146,22 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
       ),
     );
 
+  const getByThreadAndSession: ProjectionThreadSessionRepositoryShape["getByThreadAndSession"] = (
+    input,
+  ) =>
+    getProjectionThreadSessionRowBySession(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionThreadSessionRepository.getByThreadAndSession:query"),
+      ),
+    );
+
+  const listByThreadId: ProjectionThreadSessionRepositoryShape["listByThreadId"] = (input) =>
+    listProjectionThreadSessionRows(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionThreadSessionRepository.listByThreadId:query"),
+      ),
+    );
+
   const deleteByThreadId: ProjectionThreadSessionRepositoryShape["deleteByThreadId"] = (input) =>
     deleteProjectionThreadSessionRow(input).pipe(
       Effect.mapError(
@@ -102,6 +172,8 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
   return {
     upsert,
     getByThreadId,
+    getByThreadAndSession,
+    listByThreadId,
     deleteByThreadId,
   } satisfies ProjectionThreadSessionRepositoryShape;
 });
