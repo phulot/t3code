@@ -14,6 +14,7 @@ import {
   ProviderInstanceId,
   ProviderSessionRuntimeStatus,
   RuntimeMode,
+  SessionId,
   ThreadId,
 } from "@t3tools/contracts";
 
@@ -34,6 +35,12 @@ import {
 
 export const ProviderSessionRuntime = Schema.Struct({
   threadId: ThreadId,
+  /**
+   * Session (chat) this runtime binding belongs to within the thread. Optional
+   * for backward compatibility: callers that omit it operate on the thread's
+   * single `'default'` session.
+   */
+  sessionId: Schema.optional(SessionId),
   providerName: Schema.String,
   /**
    * User-defined routing key for the configured provider instance that
@@ -55,6 +62,17 @@ export type ProviderSessionRuntime = typeof ProviderSessionRuntime.Type;
 export const GetProviderSessionRuntimeInput = Schema.Struct({ threadId: ThreadId });
 export type GetProviderSessionRuntimeInput = typeof GetProviderSessionRuntimeInput.Type;
 
+export const GetProviderSessionRuntimeBySessionInput = Schema.Struct({
+  threadId: ThreadId,
+  sessionId: SessionId,
+});
+export type GetProviderSessionRuntimeBySessionInput =
+  typeof GetProviderSessionRuntimeBySessionInput.Type;
+
+export const ListProviderSessionRuntimeByThreadInput = Schema.Struct({ threadId: ThreadId });
+export type ListProviderSessionRuntimeByThreadInput =
+  typeof ListProviderSessionRuntimeByThreadInput.Type;
+
 export const DeleteProviderSessionRuntimeInput = Schema.Struct({ threadId: ThreadId });
 export type DeleteProviderSessionRuntimeInput = typeof DeleteProviderSessionRuntimeInput.Type;
 
@@ -75,11 +93,33 @@ export class ProviderSessionRuntimeRepository extends Context.Service<
 
     /**
      * Read provider runtime state by canonical thread id.
+     *
+     * Resolves the thread's `'default'` session for backward compatibility.
      */
     readonly getByThreadId: (
       input: GetProviderSessionRuntimeInput,
     ) => Effect.Effect<
       Option.Option<ProviderSessionRuntime>,
+      ProviderSessionRuntimeRepositoryError
+    >;
+
+    /**
+     * Read provider runtime state by (thread id, session id).
+     */
+    readonly getByThreadAndSession: (
+      input: GetProviderSessionRuntimeBySessionInput,
+    ) => Effect.Effect<
+      Option.Option<ProviderSessionRuntime>,
+      ProviderSessionRuntimeRepositoryError
+    >;
+
+    /**
+     * List all provider runtime rows for a thread, in ascending session id order.
+     */
+    readonly listByThreadId: (
+      input: ListProviderSessionRuntimeByThreadInput,
+    ) => Effect.Effect<
+      ReadonlyArray<ProviderSessionRuntime>,
       ProviderSessionRuntimeRepositoryError
     >;
 
@@ -111,6 +151,7 @@ const ProviderSessionRuntimeDbRowSchema = ProviderSessionRuntime.mapFields(
 
 const ProviderSessionRuntimeRawDbRowSchema = Schema.Struct({
   threadId: Schema.String,
+  sessionId: Schema.Unknown,
   providerName: Schema.Unknown,
   providerInstanceId: Schema.Unknown,
   adapterKey: Schema.Unknown,
@@ -123,7 +164,22 @@ const ProviderSessionRuntimeRawDbRowSchema = Schema.Struct({
 
 const decodeRuntimeRow = Schema.decodeUnknownEffect(ProviderSessionRuntimeDbRowSchema);
 
+/**
+ * Literal session id for the thread's single legacy/default runtime binding.
+ * Thread-keyed methods that omit a session id resolve to this session.
+ */
+const DEFAULT_SESSION_ID = "default";
+
 const GetRuntimeRequestSchema = Schema.Struct({
+  threadId: ThreadId,
+});
+
+const GetRuntimeBySessionRequestSchema = Schema.Struct({
+  threadId: ThreadId,
+  sessionId: SessionId,
+});
+
+const ListRuntimeByThreadRequestSchema = Schema.Struct({
   threadId: ThreadId,
 });
 
@@ -153,6 +209,7 @@ export const make = Effect.gen(function* () {
       sql`
         INSERT INTO provider_session_runtime (
           thread_id,
+          session_id,
           provider_name,
           provider_instance_id,
           adapter_key,
@@ -164,6 +221,7 @@ export const make = Effect.gen(function* () {
         )
         VALUES (
           ${runtime.threadId},
+          ${runtime.sessionId ?? DEFAULT_SESSION_ID},
           ${runtime.providerName},
           ${runtime.providerInstanceId},
           ${runtime.adapterKey},
@@ -173,7 +231,7 @@ export const make = Effect.gen(function* () {
           ${runtime.resumeCursor},
           ${runtime.runtimePayload}
         )
-        ON CONFLICT (thread_id)
+        ON CONFLICT (thread_id, session_id)
         DO UPDATE SET
           provider_name = excluded.provider_name,
           provider_instance_id = excluded.provider_instance_id,
@@ -193,6 +251,7 @@ export const make = Effect.gen(function* () {
       sql`
         SELECT
           thread_id AS "threadId",
+          session_id AS "sessionId",
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
           adapter_key AS "adapterKey",
@@ -203,6 +262,51 @@ export const make = Effect.gen(function* () {
           runtime_payload_json AS "runtimePayload"
         FROM provider_session_runtime
         WHERE thread_id = ${threadId}
+          AND session_id = ${DEFAULT_SESSION_ID}
+      `,
+  });
+
+  const getRuntimeRowByThreadAndSession = SqlSchema.findOneOption({
+    Request: GetRuntimeBySessionRequestSchema,
+    Result: ProviderSessionRuntimeRawDbRowSchema,
+    execute: ({ threadId, sessionId }) =>
+      sql`
+        SELECT
+          thread_id AS "threadId",
+          session_id AS "sessionId",
+          provider_name AS "providerName",
+          provider_instance_id AS "providerInstanceId",
+          adapter_key AS "adapterKey",
+          runtime_mode AS "runtimeMode",
+          status,
+          last_seen_at AS "lastSeenAt",
+          resume_cursor_json AS "resumeCursor",
+          runtime_payload_json AS "runtimePayload"
+        FROM provider_session_runtime
+        WHERE thread_id = ${threadId}
+          AND session_id = ${sessionId}
+      `,
+  });
+
+  const listRuntimeRowsByThread = SqlSchema.findAll({
+    Request: ListRuntimeByThreadRequestSchema,
+    Result: ProviderSessionRuntimeRawDbRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          thread_id AS "threadId",
+          session_id AS "sessionId",
+          provider_name AS "providerName",
+          provider_instance_id AS "providerInstanceId",
+          adapter_key AS "adapterKey",
+          runtime_mode AS "runtimeMode",
+          status,
+          last_seen_at AS "lastSeenAt",
+          resume_cursor_json AS "resumeCursor",
+          runtime_payload_json AS "runtimePayload"
+        FROM provider_session_runtime
+        WHERE thread_id = ${threadId}
+        ORDER BY session_id ASC
       `,
   });
 
@@ -213,6 +317,7 @@ export const make = Effect.gen(function* () {
       sql`
         SELECT
           thread_id AS "threadId",
+          session_id AS "sessionId",
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
           adapter_key AS "adapterKey",
@@ -273,6 +378,67 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  const getByThreadAndSession: ProviderSessionRuntimeRepository["Service"]["getByThreadAndSession"] =
+    (input) =>
+      getRuntimeRowByThreadAndSession(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProviderSessionRuntimeRepository.getByThreadAndSession:query",
+            "ProviderSessionRuntimeRepository.getByThreadAndSession:decodeRow",
+            { threadId: input.threadId },
+          ),
+        ),
+        Effect.flatMap((runtimeRowOption) =>
+          Option.match(runtimeRowOption, {
+            onNone: () => Effect.succeed(Option.none()),
+            onSome: (row) =>
+              decodeRuntimeRow(row).pipe(
+                Effect.mapError((cause) =>
+                  PersistenceDecodeError.fromSchemaError(
+                    "ProviderSessionRuntimeRepository.getByThreadAndSession:decodeRow",
+                    cause,
+                    { threadId: input.threadId },
+                  ),
+                ),
+                Effect.map((runtime) => Option.some(runtime)),
+              ),
+          }),
+        ),
+      );
+
+  const listByThreadId: ProviderSessionRuntimeRepository["Service"]["listByThreadId"] = (input) =>
+    listRuntimeRowsByThread(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProviderSessionRuntimeRepository.listByThreadId:query",
+          "ProviderSessionRuntimeRepository.listByThreadId:decodeRows",
+          { threadId: input.threadId },
+        ),
+      ),
+      Effect.flatMap((rows) =>
+        Effect.forEach(rows, (row) =>
+          decodeRuntimeRow(row).pipe(
+            Effect.map(Option.some),
+            Effect.catch((cause) =>
+              Effect.logWarning("provider.session.runtime.row-skipped", {
+                threadId: row.threadId,
+                error: PersistenceDecodeError.fromSchemaError(
+                  "ProviderSessionRuntimeRepository.listByThreadId:decodeRows",
+                  cause,
+                  { threadId: row.threadId },
+                ).message,
+              }).pipe(Effect.as(Option.none<ProviderSessionRuntime>())),
+            ),
+          ),
+        ),
+      ),
+      Effect.map((decoded) =>
+        Arr.filterMap(decoded, (row) =>
+          Option.isSome(row) ? Result.succeed(row.value) : Result.failVoid,
+        ),
+      ),
+    );
+
   const list: ProviderSessionRuntimeRepository["Service"]["list"] = () =>
     listRuntimeRows(undefined).pipe(
       Effect.mapError(
@@ -325,6 +491,8 @@ export const make = Effect.gen(function* () {
   return {
     upsert,
     getByThreadId,
+    getByThreadAndSession,
+    listByThreadId,
     list,
     deleteByThreadId,
   } satisfies ProviderSessionRuntimeRepository["Service"];

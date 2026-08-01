@@ -2,7 +2,9 @@ import { useRoute, type RouteProp } from "@react-navigation/native";
 import { useMemo, useRef } from "react";
 import {
   EnvironmentId,
+  type OrchestrationSession,
   type OrchestrationThread,
+  type SessionId,
   ThreadId,
   type ScopedProjectRef,
   type ScopedThreadRef,
@@ -13,13 +15,21 @@ import * as Option from "effect/Option";
 import { useProject, useThreadShell } from "../state/entities";
 import { useEnvironmentThread } from "../state/threads";
 import {
+  resolveActiveSessionId,
+  resolveThreadSessions,
+  sessionIdOf,
+} from "../features/threads/threadPresentation";
+import {
   useRemoteEnvironmentRuntime,
   useSavedRemoteConnection,
 } from "./use-remote-environment-registry";
 type ThreadSelectionRouteParams = {
   readonly environmentId?: string | string[];
   readonly threadId?: string | string[];
+  readonly sessionId?: string | string[];
 };
+
+const EMPTY_SESSIONS: ReadonlyArray<OrchestrationSession> = [];
 
 function firstRouteParam(value: string | string[] | undefined): string | null {
   if (Array.isArray(value)) {
@@ -118,6 +128,26 @@ function useResolvedThreadSelection(params: ThreadSelectionRouteParams | undefin
   const selectedEnvironmentConnection = useSavedRemoteConnection(selectedEnvironmentId);
   const selectedEnvironmentRuntime = useRemoteEnvironmentRuntime(selectedEnvironmentId);
 
+  // Sessions (chats) hosted by this thread come from the full detail (the shell
+  // has only the scalar `session`, no `sessions[]`). Legacy single-session
+  // threads synthesize one default entry so their chrome stays untouched.
+  const sessions = useMemo(
+    () => (selectedThreadDetail ? resolveThreadSessions(selectedThreadDetail) : EMPTY_SESSIONS),
+    [selectedThreadDetail],
+  );
+  const requestedSessionId = firstRouteParam(routeParams.sessionId);
+  const sessionIdKey = sessions.map((session) => sessionIdOf(session)).join("|");
+  const activeSessionId = useMemo<SessionId>(
+    () => resolveActiveSessionId(sessions, requestedSessionId),
+    // sessionIdKey stands in for the sessions list identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [requestedSessionId, sessionIdKey],
+  );
+  const activeSession = useMemo(
+    () => sessions.find((session) => sessionIdOf(session) === activeSessionId) ?? null,
+    [sessions, activeSessionId],
+  );
+
   return useMemo(
     () => ({
       selectedThreadRef,
@@ -125,6 +155,9 @@ function useResolvedThreadSelection(params: ThreadSelectionRouteParams | undefin
       selectedThreadProject,
       selectedEnvironmentConnection,
       selectedEnvironmentRuntime,
+      sessions,
+      activeSessionId,
+      activeSession,
     }),
     [
       selectedEnvironmentConnection,
@@ -132,6 +165,9 @@ function useResolvedThreadSelection(params: ThreadSelectionRouteParams | undefin
       selectedThread,
       selectedThreadProject,
       selectedThreadRef,
+      sessions,
+      activeSessionId,
+      activeSession,
     ],
   );
 }

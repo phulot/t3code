@@ -184,6 +184,12 @@ function ChatRouteLayout() {
 }
 
 export const Route = createFileRoute("/_chat")({
+  // Active session (chat) within a thread. Deep-linkable and retained across
+  // child routes; absent for legacy single-session threads.
+  validateSearch: (search: Record<string, unknown>): { session?: string } =>
+    typeof search.session === "string" && search.session.length > 0
+      ? { session: search.session }
+      : {},
   beforeLoad: async ({ context }) => {
     if (
       context.authGateState.status !== "authenticated" &&

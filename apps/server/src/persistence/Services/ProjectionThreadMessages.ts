@@ -10,6 +10,7 @@ import {
   ChatAttachment,
   MessageId,
   OrchestrationMessageRole,
+  SessionId,
   ThreadId,
   TurnId,
   IsoDateTime,
@@ -24,6 +25,12 @@ import type { ProjectionRepositoryError } from "../Errors.ts";
 export const ProjectionThreadMessage = Schema.Struct({
   messageId: MessageId,
   threadId: ThreadId,
+  /**
+   * Session (chat) this message belongs to within the thread. Optional for
+   * backward compatibility: callers that omit it write to the thread's single
+   * `'default'` session.
+   */
+  sessionId: Schema.optional(SessionId),
   turnId: Schema.NullOr(TurnId),
   role: OrchestrationMessageRole,
   text: Schema.String,
@@ -38,6 +45,13 @@ export const ListProjectionThreadMessagesInput = Schema.Struct({
   threadId: ThreadId,
 });
 export type ListProjectionThreadMessagesInput = typeof ListProjectionThreadMessagesInput.Type;
+
+export const ListProjectionThreadMessagesBySessionInput = Schema.Struct({
+  threadId: ThreadId,
+  sessionId: SessionId,
+});
+export type ListProjectionThreadMessagesBySessionInput =
+  typeof ListProjectionThreadMessagesBySessionInput.Type;
 
 export const GetProjectionThreadMessageInput = Schema.Struct({
   messageId: MessageId,
@@ -76,6 +90,15 @@ export interface ProjectionThreadMessageRepositoryShape {
    */
   readonly listByThreadId: (
     input: ListProjectionThreadMessagesInput,
+  ) => Effect.Effect<ReadonlyArray<ProjectionThreadMessage>, ProjectionRepositoryError>;
+
+  /**
+   * List projected thread messages for a single session of a thread.
+   *
+   * Returned in ascending creation order.
+   */
+  readonly listByThreadSession: (
+    input: ListProjectionThreadMessagesBySessionInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadMessage>, ProjectionRepositoryError>;
 
   /**

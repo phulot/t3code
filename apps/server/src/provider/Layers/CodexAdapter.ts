@@ -23,6 +23,9 @@ import {
   ProviderApprovalDecision,
   ThreadId,
   ProviderSendTurnInput,
+  DEFAULT_SESSION_ID,
+  stampOwningSessionId,
+  type SessionId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Crypto from "effect/Crypto";
@@ -87,6 +90,7 @@ export interface CodexAdapterLiveOptions {
 
 interface CodexAdapterSessionContext {
   readonly threadId: ThreadId;
+  readonly sessionId: SessionId;
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
@@ -1372,7 +1376,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const managedNativeEventLogger =
     options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
-  const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
+  const sessions = new Map<string, CodexAdapterSessionContext>();
+  const sessionKey = (threadId: ThreadId, sessionId: SessionId = DEFAULT_SESSION_ID) =>
+    `${threadId} ${sessionId}`;
 
   const startSession: CodexAdapterShape["startSession"] = (input) =>
     Effect.scoped(
@@ -1385,7 +1391,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           });
         }
 
-        const existing = sessions.get(input.threadId);
+        const existing = sessions.get(sessionKey(input.threadId, input.sessionId));
         if (existing && !existing.stopped) {
           yield* Effect.suspend(() => stopSessionInternal(existing));
         }
@@ -1450,7 +1456,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
             yield* writeNativeEvent(event);
-            const runtimeEvents = mapToRuntimeEvents(event, event.threadId);
+            const runtimeEvents = mapToRuntimeEvents(event, event.threadId).map((runtimeEvent) =>
+              stampOwningSessionId(input.sessionId ?? DEFAULT_SESSION_ID, runtimeEvent),
+            );
             if (runtimeEvents.length === 0) {
               yield* Effect.logDebug("ignoring unhandled Codex provider event", {
                 method: event.method,
@@ -1483,8 +1491,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ),
         );
 
-        sessions.set(input.threadId, {
+        sessions.set(sessionKey(input.threadId, input.sessionId), {
           threadId: input.threadId,
+          sessionId: input.sessionId ?? DEFAULT_SESSION_ID,
           scope: sessionScope,
           runtime,
           eventFiber,
@@ -1535,7 +1544,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       { concurrency: 1 },
     );
 
-    const session = yield* requireSession(input.threadId);
+    const session = yield* requireSession(input.threadId, input.sessionId);
     const reasoningEffort =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
@@ -1562,8 +1571,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
   });
 
-  const requireSession = Effect.fn("requireSession")(function* (threadId: ThreadId) {
-    const session = sessions.get(threadId);
+  const requireSession = Effect.fn("requireSession")(function* (
+    threadId: ThreadId,
+    sessionId?: SessionId,
+  ) {
+    const session = sessions.get(sessionKey(threadId, sessionId));
     if (!session || session.stopped) {
       return yield* new ProviderAdapterSessionNotFoundError({
         provider: PROVIDER,
@@ -1573,8 +1585,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     return session;
   });
 
-  const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId) =>
-    requireSession(threadId).pipe(
+  const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId, sessionId) =>
+    requireSession(threadId, sessionId).pipe(
       Effect.flatMap((session) => session.runtime.interruptTurn(turnId)),
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
@@ -1583,8 +1595,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       ),
     );
 
-  const readThread: CodexAdapterShape["readThread"] = (threadId) =>
-    requireSession(threadId).pipe(
+  const readThread: CodexAdapterShape["readThread"] = (threadId, sessionId) =>
+    requireSession(threadId, sessionId).pipe(
       Effect.flatMap((session) => session.runtime.readThread),
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
@@ -1597,7 +1609,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       })),
     );
 
-  const rollbackThread: CodexAdapterShape["rollbackThread"] = (threadId, numTurns) => {
+  const rollbackThread: CodexAdapterShape["rollbackThread"] = (threadId, numTurns, sessionId) => {
     if (!Number.isInteger(numTurns) || numTurns < 1) {
       return Effect.fail(
         new ProviderAdapterValidationError({
@@ -1608,7 +1620,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       );
     }
 
-    return requireSession(threadId).pipe(
+    return requireSession(threadId, sessionId).pipe(
       Effect.flatMap((session) => session.runtime.rollbackThread(numTurns)),
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
@@ -1622,8 +1634,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
   };
 
-  const respondToRequest: CodexAdapterShape["respondToRequest"] = (threadId, requestId, decision) =>
-    requireSession(threadId).pipe(
+  const respondToRequest: CodexAdapterShape["respondToRequest"] = (
+    threadId,
+    requestId,
+    decision,
+    sessionId,
+  ) =>
+    requireSession(threadId, sessionId).pipe(
       Effect.flatMap((session) => session.runtime.respondToRequest(requestId, decision)),
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
@@ -1636,8 +1653,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     threadId,
     requestId,
     answers,
+    sessionId,
   ) =>
-    requireSession(threadId).pipe(
+    requireSession(threadId, sessionId).pipe(
       Effect.flatMap((session) => session.runtime.respondToUserInput(requestId, answers)),
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
@@ -1660,15 +1678,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       return;
     }
     session.stopped = true;
-    sessions.delete(session.threadId);
+    sessions.delete(sessionKey(session.threadId, session.sessionId));
     yield* session.runtime.close.pipe(Effect.ignore);
     yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
   });
 
-  const stopSession: CodexAdapterShape["stopSession"] = (threadId) =>
+  const stopSession: CodexAdapterShape["stopSession"] = (threadId, sessionId) =>
     Effect.gen(function* () {
-      const session = sessions.get(threadId);
+      const session = sessions.get(sessionKey(threadId, sessionId));
       if (!session) {
         return;
       }
@@ -1682,8 +1700,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       { concurrency: 1 },
     );
 
-  const hasSession: CodexAdapterShape["hasSession"] = (threadId) =>
-    Effect.succeed(Boolean(sessions.get(threadId) && !sessions.get(threadId)?.stopped));
+  const hasSession: CodexAdapterShape["hasSession"] = (threadId, sessionId) => {
+    const key = sessionKey(threadId, sessionId);
+    return Effect.succeed(Boolean(sessions.get(key) && !sessions.get(key)?.stopped));
+  };
 
   const stopAll: CodexAdapterShape["stopAll"] = () =>
     Effect.forEach(Array.from(sessions.values()), stopSessionInternal, {

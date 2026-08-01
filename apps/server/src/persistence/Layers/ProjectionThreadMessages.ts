@@ -13,9 +13,16 @@ import {
   ProjectionThreadMessageRepository,
   type ProjectionThreadMessageRepositoryShape,
   DeleteProjectionThreadMessagesInput,
+  ListProjectionThreadMessagesBySessionInput,
   ListProjectionThreadMessagesInput,
   ProjectionThreadMessage,
 } from "../Services/ProjectionThreadMessages.ts";
+
+/**
+ * Literal session id for the thread's single legacy/default chat. Thread-keyed
+ * writes that omit a session id resolve to this session.
+ */
+const DEFAULT_SESSION_ID = "default";
 
 const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
   Struct.assign({
@@ -36,6 +43,7 @@ function toProjectionThreadMessage(
     isStreaming: row.isStreaming === 1,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    ...(row.sessionId !== undefined ? { sessionId: row.sessionId } : {}),
     ...(row.attachments !== null ? { attachments: row.attachments } : {}),
   };
 }
@@ -52,6 +60,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
         INSERT INTO projection_thread_messages (
           message_id,
           thread_id,
+          session_id,
           turn_id,
           role,
           text,
@@ -63,6 +72,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
         VALUES (
           ${row.messageId},
           ${row.threadId},
+          ${row.sessionId ?? DEFAULT_SESSION_ID},
           ${row.turnId},
           ${row.role},
           ${row.text},
@@ -103,6 +113,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
         SELECT
           message_id AS "messageId",
           thread_id AS "threadId",
+          session_id AS "sessionId",
           turn_id AS "turnId",
           role,
           text,
@@ -124,6 +135,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
         SELECT
           message_id AS "messageId",
           thread_id AS "threadId",
+          session_id AS "sessionId",
           turn_id AS "turnId",
           role,
           text,
@@ -133,6 +145,29 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           updated_at AS "updatedAt"
         FROM projection_thread_messages
         WHERE thread_id = ${threadId}
+        ORDER BY created_at ASC, message_id ASC
+      `,
+  });
+
+  const listProjectionThreadMessageRowsBySession = SqlSchema.findAll({
+    Request: ListProjectionThreadMessagesBySessionInput,
+    Result: ProjectionThreadMessageDbRowSchema,
+    execute: ({ threadId, sessionId }) =>
+      sql`
+        SELECT
+          message_id AS "messageId",
+          thread_id AS "threadId",
+          session_id AS "sessionId",
+          turn_id AS "turnId",
+          role,
+          text,
+          attachments_json AS "attachments",
+          is_streaming AS "isStreaming",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+        FROM projection_thread_messages
+        WHERE thread_id = ${threadId}
+          AND session_id = ${sessionId}
         ORDER BY created_at ASC, message_id ASC
       `,
   });
@@ -167,6 +202,16 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
       Effect.map((rows) => rows.map(toProjectionThreadMessage)),
     );
 
+  const listByThreadSession: ProjectionThreadMessageRepositoryShape["listByThreadSession"] = (
+    input,
+  ) =>
+    listProjectionThreadMessageRowsBySession(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionThreadMessageRepository.listByThreadSession:query"),
+      ),
+      Effect.map((rows) => rows.map(toProjectionThreadMessage)),
+    );
+
   const deleteByThreadId: ProjectionThreadMessageRepositoryShape["deleteByThreadId"] = (input) =>
     deleteProjectionThreadMessageRows(input).pipe(
       Effect.mapError(
@@ -178,6 +223,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
     upsert,
     getByMessageId,
     listByThreadId,
+    listByThreadSession,
     deleteByThreadId,
   } satisfies ProjectionThreadMessageRepositoryShape;
 });

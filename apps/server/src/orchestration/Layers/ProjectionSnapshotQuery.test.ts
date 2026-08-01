@@ -3,6 +3,7 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  SessionId,
   ThreadId,
   TurnId,
   ProviderInstanceId,
@@ -360,6 +361,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           ],
           session: {
             threadId: ThreadId.make("thread-1"),
+            sessionId: SessionId.make("default"),
             status: "running",
             providerName: "codex",
             runtimeMode: "approval-required",
@@ -367,6 +369,18 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             lastError: null,
             updatedAt: "2026-02-24T00:00:07.000Z",
           },
+          sessions: [
+            {
+              threadId: ThreadId.make("thread-1"),
+              sessionId: SessionId.make("default"),
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: asTurnId("turn-1"),
+              lastError: null,
+              updatedAt: "2026-02-24T00:00:07.000Z",
+            },
+          ],
         },
       ]);
 
@@ -430,6 +444,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           titleRegeneration: null,
           session: {
             threadId: ThreadId.make("thread-1"),
+            sessionId: SessionId.make("default"),
             status: "running",
             providerName: "codex",
             runtimeMode: "approval-required",

@@ -5,6 +5,7 @@ import {
   EventId,
   IsoDateTime,
   ProviderItemId,
+  SessionId,
   ThreadId,
   TurnId,
 } from "./baseSchemas.ts";
@@ -32,6 +33,7 @@ const ProviderSessionStatus = Schema.Literals([
 ]);
 
 export const ProviderSession = Schema.Struct({
+  sessionId: Schema.optional(SessionId),
   provider: ProviderDriverKind,
   // Optional during the driver/instance migration. Once every producer
   // populates it (post-slice-4), routing flips to instance-id-only and the
@@ -52,6 +54,9 @@ export type ProviderSession = typeof ProviderSession.Type;
 
 export const ProviderSessionStartInput = Schema.Struct({
   threadId: ThreadId,
+  // Session within the thread that owns the started process. Absent for legacy
+  // single-session callers; the service defaults it to DEFAULT_SESSION_ID.
+  sessionId: Schema.optional(SessionId),
   provider: Schema.optional(ProviderDriverKind),
   // See ProviderSession for the migration story.
   providerInstanceId: Schema.optional(ProviderInstanceId),
@@ -66,6 +71,7 @@ export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
 export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   input: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
   ),
@@ -86,17 +92,20 @@ export type ProviderTurnStartResult = typeof ProviderTurnStartResult.Type;
 
 export const ProviderInterruptTurnInput = Schema.Struct({
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   turnId: Schema.optional(TurnId),
 });
 export type ProviderInterruptTurnInput = typeof ProviderInterruptTurnInput.Type;
 
 export const ProviderStopSessionInput = Schema.Struct({
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
 });
 export type ProviderStopSessionInput = typeof ProviderStopSessionInput.Type;
 
 export const ProviderRespondToRequestInput = Schema.Struct({
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   requestId: ApprovalRequestId,
   decision: ProviderApprovalDecision,
 });
@@ -104,6 +113,7 @@ export type ProviderRespondToRequestInput = typeof ProviderRespondToRequestInput
 
 export const ProviderRespondToUserInputInput = Schema.Struct({
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
 });

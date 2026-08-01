@@ -12,6 +12,8 @@ import {
   type ServerProvider,
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
+  type SessionId,
+  DEFAULT_SESSION_ID,
   type ThreadId,
   type TurnId,
   type KeybindingCommand,
@@ -28,6 +30,7 @@ import {
 import { effectiveSettled, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import {
   parseScopedThreadKey,
+  scopedSessionVisitKey,
   scopedThreadKey,
   scopeProjectRef,
   scopeThreadRef,
@@ -55,7 +58,7 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
 import {
   isAtomCommandInterrupted,
@@ -221,6 +224,7 @@ import {
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
+import { SessionTabs } from "./chat/SessionTabs";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
@@ -270,6 +274,9 @@ import {
   readFileAsDataUrl,
   reconcileMountedTerminalThreadIds,
   resolveThreadMetadataUpdateForNextTurn,
+  resolveThreadSessions,
+  scopeThreadToSession,
+  sessionIdOf,
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
@@ -1177,6 +1184,9 @@ function ChatViewContent(props: ChatViewProps) {
   const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
     reportFailure: false,
   });
+  const createThreadSession = useAtomCommand(threadEnvironment.createSession, {
+    reportFailure: false,
+  });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
   const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
   const { environments } = useEnvironments();
@@ -1205,9 +1215,37 @@ function ChatViewContent(props: ChatViewProps) {
     [routeServerThreadShell, threadDetailLoading],
   );
   const activeServerThread = serverThread ?? loadingServerThread;
+  // Sessions (chats) hosted by this thread, in server order (default first).
+  const threadSessions = useMemo(
+    () => resolveThreadSessions(activeServerThread),
+    [activeServerThread],
+  );
+  const sessionIdList = useMemo(
+    () => threadSessions.map((session) => sessionIdOf(session)),
+    [threadSessions],
+  );
+  const sessionIdKey = sessionIdList.join("|");
+  const routeSearch = useSearch({ strict: false }) as { session?: string };
+  const requestedSessionId = routeSearch.session ?? null;
+  const activeSessionId = useMemo<SessionId>(() => {
+    if (requestedSessionId && sessionIdList.includes(requestedSessionId as SessionId)) {
+      return requestedSessionId as SessionId;
+    }
+    return sessionIdList[0] ?? DEFAULT_SESSION_ID;
+    // sessionIdKey captures the identity of sessionIdList without array churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedSessionId, sessionIdKey]);
   const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
+  const markSessionVisited = useUiStateStore((store) => store.markSessionVisited);
   const activeThreadLastVisitedAt = useUiStateStore(
     (store) => store.threadLastVisitedAtById[routeThreadKey],
+  );
+  const activeSessionVisitKey = useMemo(
+    () => scopedSessionVisitKey(routeThreadKey, activeSessionId),
+    [routeThreadKey, activeSessionId],
+  );
+  const activeSessionLastVisitedAt = useUiStateStore(
+    (store) => store.sessionLastVisitedAtById[activeSessionVisitKey],
   );
   const settings = useEnvironmentSettings(environmentId);
   // New-thread defaults live in the primary environment's settings.json (the
@@ -1438,16 +1476,77 @@ function ChatViewContent(props: ChatViewProps) {
   // server thread (same pre-allocated ref) starts, so live state must not
   // depend on which route is mounted.
   const isServerThread = activeServerThread !== null;
-  const activeThread = activeServerThread ?? localDraftThread;
+  const rawActiveThread = activeServerThread ?? localDraftThread;
+  // Narrow the thread to the active session so the whole chat view (messages,
+  // status, latest turn) reflects only that session. A no-op for legacy
+  // single-session threads and drafts, keeping their behavior unchanged.
+  const activeThread = useMemo(
+    () =>
+      rawActiveThread ? scopeThreadToSession(rawActiveThread, activeSessionId) : rawActiveThread,
+    [rawActiveThread, activeSessionId],
+  );
   const threadError = isServerThread
-    ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
+    ? (localServerError ?? activeThread?.session?.lastError ?? null)
     : localDraftError;
+  // Only stamp a sessionId on session-scoped commands once a thread hosts more
+  // than one session; single-session/legacy threads omit it so the server's
+  // "absent = default" behavior is preserved exactly.
+  const commandSessionId: SessionId | undefined =
+    sessionIdList.length > 1 ? activeThread?.session?.sessionId : undefined;
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode =
     composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   const canCheckoutPullRequestIntoThread = isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
+  // Session selection lives in the URL (?session=…) so tabs are deep-linkable.
+  const selectSession = useCallback(
+    (sessionId: SessionId) => {
+      void navigate({
+        // Stay on the current route; only swap the session search param.
+        to: ".",
+        search: (prev: Record<string, unknown>) => ({ ...prev, session: sessionId }),
+        replace: true,
+      });
+    },
+    [navigate],
+  );
+  // Cmd+T mints a fresh session server-side, then switches to it. The dispatch
+  // result carries no id, so we remember the pre-create id set and select the
+  // session that newly appears in sessions[].
+  const pendingSelectNewSessionRef = useRef(false);
+  const knownSessionIdsRef = useRef<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    if (!pendingSelectNewSessionRef.current) {
+      knownSessionIdsRef.current = new Set(sessionIdList);
+      return;
+    }
+    const previous = knownSessionIdsRef.current;
+    const added = sessionIdList.find((id) => !previous.has(id));
+    if (added) {
+      pendingSelectNewSessionRef.current = false;
+      knownSessionIdsRef.current = new Set(sessionIdList);
+      selectSession(added);
+    }
+    // sessionIdKey stands in for sessionIdList identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionIdKey, selectSession]);
+  const handleCreateSession = useCallback(async () => {
+    if (!isServerThread || !activeThreadId) {
+      return;
+    }
+    pendingSelectNewSessionRef.current = true;
+    knownSessionIdsRef.current = new Set(sessionIdList);
+    const result = await createThreadSession({
+      environmentId,
+      input: { threadId: activeThreadId },
+    });
+    if (result._tag === "Failure") {
+      pendingSelectNewSessionRef.current = false;
+    }
+    // sessionIdKey stands in for sessionIdList identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeThreadId, createThreadSession, environmentId, isServerThread, sessionIdKey]);
   const runningTerminalIds = useThreadRunningTerminalIds({
     environmentId: activeThread?.environmentId ?? null,
     threadId: activeThreadId,
@@ -1842,6 +1941,26 @@ function ChatViewContent(props: ChatViewProps) {
     serverThread?.updatedAt,
   ]);
 
+  // Per-session "consulted" marker: bringing a session's tab to the foreground
+  // clears its transient Completed pill. We stamp the current time (which is >
+  // the turn's completedAt) so hasUnseenCompletion resolves to false for it.
+  useEffect(() => {
+    if (!serverThread?.id) return;
+    const completedAt = activeLatestTurn?.completedAt;
+    if (!completedAt) return;
+    const completedAtMs = Date.parse(completedAt);
+    if (Number.isNaN(completedAtMs)) return;
+    const lastVisitedMs = activeSessionLastVisitedAt ? Date.parse(activeSessionLastVisitedAt) : NaN;
+    if (!Number.isNaN(lastVisitedMs) && lastVisitedMs >= completedAtMs) return;
+    markSessionVisited(activeSessionVisitKey, new Date().toISOString());
+  }, [
+    activeLatestTurn?.completedAt,
+    activeSessionLastVisitedAt,
+    activeSessionVisitKey,
+    markSessionVisited,
+    serverThread?.id,
+  ]);
+
   const selectedProviderByThreadId = composerActiveProvider ?? null;
   const threadProvider =
     activeThread?.modelSelection.instanceId ??
@@ -2064,6 +2183,16 @@ function ChatViewContent(props: ChatViewProps) {
     latestTurnSettled &&
     hasActionableProposedPlan(activeProposedPlan);
   const activePendingApproval = pendingApprovals[0] ?? null;
+  // Per-tab attention dot. Approvals/user-input/plan flags derive from the
+  // thread's activities, which the read model surfaces for the active session;
+  // so we attribute them to the currently-selected session's tab.
+  const attentionSessionIds = useMemo<ReadonlySet<SessionId>>(() => {
+    const ids = new Set<SessionId>();
+    if (activePendingApproval || activePendingUserInput || showPlanFollowUpPrompt) {
+      ids.add(activeSessionId);
+    }
+    return ids;
+  }, [activePendingApproval, activePendingUserInput, showPlanFollowUpPrompt, activeSessionId]);
   const {
     beginLocalDispatch,
     resetLocalDispatch,
@@ -4324,6 +4453,22 @@ function ChatViewContent(props: ChatViewProps) {
         }
       }
 
+      // Cmd/Ctrl+T opens a new session (chat) on the active thread and switches
+      // to it. Handled directly here (not via the configurable keybinding table)
+      // so it stays a fixed, discoverable thread-view shortcut.
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        (event.key === "t" || event.key === "T")
+      ) {
+        if (!isServerThread || !activeThreadId) return;
+        event.preventDefault();
+        event.stopPropagation();
+        void handleCreateSession();
+        return;
+      }
+
       const command = resolveShortcutCommand(event, keybindings, {
         context: shortcutContext,
       });
@@ -4440,6 +4585,8 @@ function ChatViewContent(props: ChatViewProps) {
     toggleRightPanel,
     toggleTerminalVisibility,
     composerRef,
+    handleCreateSession,
+    isServerThread,
   ]);
 
   const onRevertToTurnCount = useCallback(
@@ -4821,6 +4968,7 @@ function ChatViewContent(props: ChatViewProps) {
         environmentId,
         input: {
           threadId: threadIdForSend,
+          ...(commandSessionId ? { sessionId: commandSessionId } : {}),
           message: {
             messageId: messageIdForSend,
             role: "user",
@@ -4921,6 +5069,7 @@ function ChatViewContent(props: ChatViewProps) {
         environmentId,
         input: {
           threadId: activeThreadId,
+          ...(commandSessionId ? { sessionId: commandSessionId } : {}),
           requestId,
           decision,
         },
@@ -4935,7 +5084,7 @@ function ChatViewContent(props: ChatViewProps) {
       setRespondingRequestIds((existing) => existing.filter((id) => id !== requestId));
       return result;
     },
-    [activeThreadId, environmentId, respondToThreadApproval, setThreadError],
+    [activeThreadId, commandSessionId, environmentId, respondToThreadApproval, setThreadError],
   );
 
   const onRespondToUserInput = useCallback(
@@ -4949,6 +5098,7 @@ function ChatViewContent(props: ChatViewProps) {
         environmentId,
         input: {
           threadId: activeThreadId,
+          ...(commandSessionId ? { sessionId: commandSessionId } : {}),
           requestId,
           answers,
         },
@@ -4963,7 +5113,7 @@ function ChatViewContent(props: ChatViewProps) {
       setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
       return result;
     },
-    [activeThreadId, environmentId, respondToThreadUserInput, setThreadError],
+    [activeThreadId, commandSessionId, environmentId, respondToThreadUserInput, setThreadError],
   );
 
   const setActivePendingUserInputQuestionIndex = useCallback(
@@ -5173,6 +5323,7 @@ function ChatViewContent(props: ChatViewProps) {
           environmentId,
           input: {
             threadId: threadIdForSend,
+            ...(commandSessionId ? { sessionId: commandSessionId } : {}),
             message: {
               messageId: messageIdForSend,
               role: "user",
@@ -5228,6 +5379,7 @@ function ChatViewContent(props: ChatViewProps) {
       activeThread,
       activeProposedPlan,
       beginLocalDispatch,
+      commandSessionId,
       isConnecting,
       isSendBusy,
       isServerThread,
@@ -5723,6 +5875,17 @@ function ChatViewContent(props: ChatViewProps) {
             onDeleteProjectScript={deleteProjectScript}
           />
         </header>
+
+        {isServerThread && threadSessions.length > 1 ? (
+          <SessionTabs
+            sessions={threadSessions}
+            activeSessionId={activeSessionId}
+            attentionSessionIds={attentionSessionIds}
+            onSelectSession={selectSession}
+            onCreateSession={handleCreateSession}
+            createShortcutLabel="⌘T"
+          />
+        ) : null}
 
         <ThreadErrorBanner
           error={threadError}

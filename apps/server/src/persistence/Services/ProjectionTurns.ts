@@ -14,6 +14,7 @@ import {
   OrchestrationProposedPlanId,
   OrchestrationCheckpointFile,
   OrchestrationCheckpointStatus,
+  SessionId,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -35,6 +36,13 @@ export type ProjectionTurnState = typeof ProjectionTurnState.Type;
 
 export const ProjectionTurn = Schema.Struct({
   threadId: ThreadId,
+  /**
+   * Session (chat) that owns this turn within the thread. Optional for backward
+   * compatibility: rows written without it belong to the `'default'` session.
+   * Checkpoints/revert stay thread/worktree-level, so `checkpointTurnCount`
+   * uniqueness remains thread-scoped and is NOT scoped by session.
+   */
+  sessionId: Schema.optional(SessionId),
   turnId: Schema.NullOr(TurnId),
   pendingMessageId: Schema.NullOr(MessageId),
   sourceProposedPlanThreadId: Schema.NullOr(ThreadId),
@@ -53,6 +61,7 @@ export type ProjectionTurn = typeof ProjectionTurn.Type;
 
 export const ProjectionTurnById = Schema.Struct({
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   turnId: TurnId,
   pendingMessageId: Schema.NullOr(MessageId),
   sourceProposedPlanThreadId: Schema.NullOr(ThreadId),
@@ -71,6 +80,7 @@ export type ProjectionTurnById = typeof ProjectionTurnById.Type;
 
 export const ProjectionPendingTurnStart = Schema.Struct({
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   messageId: MessageId,
   sourceProposedPlanThreadId: Schema.NullOr(ThreadId),
   sourceProposedPlanId: Schema.NullOr(OrchestrationProposedPlanId),
@@ -82,6 +92,12 @@ export const ListProjectionTurnsByThreadInput = Schema.Struct({
   threadId: ThreadId,
 });
 export type ListProjectionTurnsByThreadInput = typeof ListProjectionTurnsByThreadInput.Type;
+
+export const ListProjectionTurnsBySessionInput = Schema.Struct({
+  threadId: ThreadId,
+  sessionId: SessionId,
+});
+export type ListProjectionTurnsBySessionInput = typeof ListProjectionTurnsBySessionInput.Type;
 
 export const GetProjectionTurnByTurnIdInput = Schema.Struct({
   threadId: ThreadId,
@@ -140,6 +156,13 @@ export interface ProjectionTurnRepositoryShape {
    */
   readonly listByThreadId: (
     input: ListProjectionTurnsByThreadInput,
+  ) => Effect.Effect<ReadonlyArray<ProjectionTurn>, ProjectionRepositoryError>;
+
+  /**
+   * Lists projection rows owned by a single session of a thread, with checkpoint rows ordered before non-checkpoint rows.
+   */
+  readonly listByThreadSession: (
+    input: ListProjectionTurnsBySessionInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionTurn>, ProjectionRepositoryError>;
 
   /**

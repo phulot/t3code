@@ -7,11 +7,13 @@ import type {
   EnvironmentId,
   MessageId,
   ModelSelection,
+  OrchestrationSession,
   OrchestrationThreadShell,
   ProviderApprovalDecision,
   ProviderInteractionMode,
   RuntimeMode,
   ServerConfig as T3ServerConfig,
+  SessionId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Haptics from "expo-haptics";
@@ -40,10 +42,16 @@ import {
   ThreadComposer,
 } from "./ThreadComposer";
 import { ThreadFeed } from "./ThreadFeed";
+import { SessionTabs } from "./SessionTabs";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
 
 export interface ThreadDetailScreenProps {
   readonly selectedThread: OrchestrationThreadShell;
+  /** Sessions (chats) hosted by the thread; drives the tab strip when >1. */
+  readonly sessions: ReadonlyArray<OrchestrationSession>;
+  readonly activeSessionId: SessionId;
+  readonly onSelectSession: (sessionId: SessionId) => void;
+  readonly onCreateSession: () => void;
   readonly contentPresentation: ThreadContentPresentation;
   readonly screenTone: StatusTone;
   readonly connectionError: string | null;
@@ -350,6 +358,14 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           onTouchEnd={handleFeedTouchEnd}
           onTouchCancel={handleFeedTouchCancel}
         >
+          {props.sessions.length > 1 ? (
+            <SessionTabs
+              sessions={props.sessions}
+              activeSessionId={props.activeSessionId}
+              onSelectSession={props.onSelectSession}
+              onCreateSession={props.onCreateSession}
+            />
+          ) : null}
           <ThreadFeed
             key={props.selectedThread.id}
             environmentId={props.environmentId}

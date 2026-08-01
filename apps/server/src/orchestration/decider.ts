@@ -1,8 +1,10 @@
 import {
   EventId,
+  SessionId,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
+  type OrchestrationSession,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
@@ -40,6 +42,29 @@ const TRIGGER_ANTI_REBOUND_MS = 60 * 1_000;
 // window is a failed/stale start, not pending work. Mirrors the client's
 // QUEUED_TURN_START_GRACE_MS in client-runtime threadSettled.ts.
 const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
+
+// A thread always hosts at least one session; the implicit first one is the
+// "default" session, minted server-side. Legacy single-session threads and
+// commands that arrive without a sessionId map onto it.
+const DEFAULT_SESSION_ID = SessionId.make("default");
+
+/**
+ * All sessions hosted by a thread. `sessions` is the multi-session source of
+ * truth once the read model populates it (STEP 4); until then — and for
+ * pre-multi-session snapshots — it falls back to the legacy single `session`
+ * scalar so thread-level guards stay identical to the pre-multi-session
+ * behavior. Settling/snooze are THREAD-level: a thread is "in flight" iff at
+ * least one of these sessions is live, so guards OR across this list.
+ */
+function threadSessions(thread: {
+  readonly session: { readonly status: string } | null;
+  readonly sessions?: ReadonlyArray<{ readonly status: string }> | undefined;
+}): ReadonlyArray<{ readonly status: string }> {
+  if (thread.sessions !== undefined && thread.sessions.length > 0) {
+    return thread.sessions;
+  }
+  return thread.session === null ? [] : [thread.session];
+}
 
 /**
  * Blocked-on-you work derived from the thread's retained activities: an
@@ -125,9 +150,13 @@ function threadHasQueuedTurnStart(
       readonly completedAt: string | null;
     } | null;
     readonly session: { readonly status: string } | null;
+    readonly sessions?: ReadonlyArray<{ readonly status: string }> | undefined;
   },
   occurredAt: string,
 ): boolean {
+  // A failed session start clears the block. Thread-level: if any session is in
+  // error the queued start it would have adopted is dead, not pending.
+  const anySessionError = threadSessions(thread).some((session) => session.status === "error");
   const latestUserMessageAtMs = thread.messages.reduce(
     (latest, message) =>
       message.role === "user" ? Math.max(latest, Date.parse(message.createdAt)) : latest,
@@ -147,7 +176,7 @@ function threadHasQueuedTurnStart(
         );
   const queuedAgeMs = Date.parse(occurredAt) - latestUserMessageAtMs;
   return (
-    thread.session?.status !== "error" &&
+    !anySessionError &&
     Number.isFinite(latestUserMessageAtMs) &&
     latestUserMessageAtMs > latestTurnAtMs &&
     Math.abs(queuedAgeMs) <= QUEUED_TURN_START_GRACE_MS
@@ -680,8 +709,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       });
       // Server-side twin of the client's canSettle session check: a stale
       // or raced client must not settle a thread whose session is coming
-      // alive or working.
-      if (thread.session?.status === "starting" || thread.session?.status === "running") {
+      // alive or working. Settling is THREAD-level, so the guard ORs across
+      // every session — one live chat blocks the whole thread from settling.
+      if (
+        threadSessions(thread).some(
+          (session) => session.status === "starting" || session.status === "running",
+        )
+      ) {
         return yield* Effect.fail(
           new OrchestrationCommandInvariantError({
             commandType: command.type,
@@ -1015,6 +1049,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.message-sent",
         payload: {
           threadId: command.threadId,
+          sessionId: command.sessionId ?? DEFAULT_SESSION_ID,
           messageId: command.message.messageId,
           role: "user",
           text: command.message.text,
@@ -1036,6 +1071,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.turn-start-requested",
         payload: {
           threadId: command.threadId,
+          sessionId: command.sessionId ?? DEFAULT_SESSION_ID,
           messageId: command.message.messageId,
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
@@ -1104,6 +1140,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.turn-interrupt-requested",
         payload: {
           threadId: command.threadId,
+          sessionId: command.sessionId ?? DEFAULT_SESSION_ID,
           ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
           createdAt: command.createdAt,
         },
@@ -1129,6 +1166,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.approval-response-requested",
         payload: {
           threadId: command.threadId,
+          sessionId: command.sessionId ?? DEFAULT_SESSION_ID,
           requestId: command.requestId,
           decision: command.decision,
           createdAt: command.createdAt,
@@ -1155,6 +1193,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.user-input-response-requested",
         payload: {
           threadId: command.threadId,
+          sessionId: command.sessionId ?? DEFAULT_SESSION_ID,
           requestId: command.requestId,
           answers: command.answers,
           createdAt: command.createdAt,
@@ -1200,7 +1239,46 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.session-stop-requested",
         payload: {
           threadId: command.threadId,
+          sessionId: command.sessionId ?? DEFAULT_SESSION_ID,
           createdAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.session.create": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      // Sessions are minted server-side, never client-supplied. Seed the new
+      // chat idle and let the provider reactor bring it alive; it shares the
+      // thread's worktree and runtime mode. Emitted as a session-set so the
+      // projector/read model needs no new event type.
+      const crypto = yield* Crypto.Crypto;
+      const sessionId = SessionId.make(yield* crypto.randomUUIDv4);
+      const session: OrchestrationSession = {
+        threadId: command.threadId,
+        sessionId,
+        status: "idle",
+        providerName: null,
+        runtimeMode: thread.runtimeMode,
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: command.createdAt,
+      };
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+          metadata: {},
+        })),
+        type: "thread.session-set",
+        payload: {
+          threadId: command.threadId,
+          session,
         },
       };
     }
@@ -1211,6 +1289,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      // A session without an explicit id is the thread's "default" session:
+      // stamp it so every downstream consumer routes by a concrete sessionId.
+      const session: OrchestrationSession = {
+        ...command.session,
+        sessionId: command.session.sessionId ?? DEFAULT_SESSION_ID,
+      };
       const sessionSetEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -1222,7 +1306,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.session-set",
         payload: {
           threadId: command.threadId,
-          session: command.session,
+          session,
         },
       };
       // Only a session coming alive is activity worth waking a settled thread

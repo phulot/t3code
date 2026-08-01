@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
-import { ProviderRuntimeEvent } from "./providerRuntime.ts";
+import { DEFAULT_SESSION_ID, SessionId } from "./baseSchemas.ts";
+import {
+  ProviderRuntimeEvent,
+  stampOwningSessionId,
+  type ProviderRuntimeEvent as ProviderRuntimeEventType,
+} from "./providerRuntime.ts";
 
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 
@@ -180,5 +185,35 @@ describe("ProviderRuntimeEvent", () => {
     }
     expect(parsed.payload.usage.maxTokens).toBe(200000);
     expect(parsed.payload.usage.usedTokens).toBe(31251);
+  });
+});
+
+describe("stampOwningSessionId", () => {
+  const baseEvent = decodeRuntimeEvent({
+    type: "session.started",
+    eventId: "event-1",
+    provider: "claudeAgent",
+    createdAt: "2026-02-28T00:00:00.000Z",
+    threadId: "thread-1",
+    payload: { message: "started" },
+  }) as ProviderRuntimeEventType;
+
+  it("stamps a non-default sessionId onto the emitted event", () => {
+    const sessionId = SessionId.make("session-b");
+    const stamped = stampOwningSessionId(sessionId, baseEvent);
+    expect(stamped.sessionId).toBe(sessionId);
+  });
+
+  it("leaves the event byte-identical for the default session", () => {
+    const stamped = stampOwningSessionId(DEFAULT_SESSION_ID, baseEvent);
+    expect(stamped).toBe(baseEvent);
+    expect(stamped.sessionId).toBe(DEFAULT_SESSION_ID);
+  });
+
+  it("decodes a stamped event back to its owning session", () => {
+    const sessionId = SessionId.make("session-c");
+    const stamped = stampOwningSessionId(sessionId, baseEvent);
+    const roundTripped = decodeRuntimeEvent(stamped);
+    expect(roundTripped.sessionId).toBe(sessionId);
   });
 });

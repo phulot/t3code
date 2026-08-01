@@ -1214,6 +1214,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       }
       yield* projectionThreadSessionRepository.upsert({
         threadId: event.payload.threadId,
+        ...(event.payload.session.sessionId !== undefined
+          ? { sessionId: event.payload.session.sessionId }
+          : {}),
         status: event.payload.session.status,
         providerName: event.payload.session.providerName,
         providerInstanceId: event.payload.session.providerInstanceId ?? null,

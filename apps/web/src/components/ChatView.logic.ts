@@ -5,8 +5,11 @@ import {
   type ServerProvider,
   type ScopedProjectRef,
   type ScopedThreadRef,
+  type SessionId,
   type ThreadId,
   type TurnId,
+  DEFAULT_SESSION_ID,
+  type OrchestrationSession,
 } from "@t3tools/contracts";
 import { type ChatMessage, type SessionPhase, type Thread, type ThreadShell } from "../types";
 import { type ComposerImageAttachment, type DraftThreadState } from "../composerDraftStore";
@@ -126,11 +129,62 @@ export function shouldWriteThreadErrorToCurrentServerThread(input: {
 export function buildThreadTurnInterruptInput(thread: Pick<Thread, "id" | "session">): {
   threadId: ThreadId;
   turnId?: TurnId;
+  sessionId?: SessionId;
 } {
   const runningTurnId = thread.session?.status === "running" ? thread.session.activeTurnId : null;
+  const sessionId = thread.session?.sessionId;
   return {
     threadId: thread.id,
     ...(runningTurnId !== null ? { turnId: runningTurnId } : {}),
+    ...(sessionId ? { sessionId } : {}),
+  };
+}
+
+/**
+ * Ordered session list for a thread. `sessions` is the multi-session source of
+ * truth; a pre-multi-session thread that only carries the scalar `session`
+ * synthesizes a single default entry so legacy threads render one seamless tab.
+ */
+export function resolveThreadSessions(
+  thread: Pick<Thread, "sessions" | "session"> | null | undefined,
+): ReadonlyArray<OrchestrationSession> {
+  if (!thread) return [];
+  if (thread.sessions && thread.sessions.length > 0) return thread.sessions;
+  if (thread.session) return [thread.session];
+  return [];
+}
+
+export function sessionIdOf(session: Pick<OrchestrationSession, "sessionId">): SessionId {
+  return session.sessionId ?? DEFAULT_SESSION_ID;
+}
+
+/**
+ * Narrow a thread to a single session: keep only that session's messages and
+ * surface its own status/latest turn through the legacy `session`/`latestTurn`
+ * fields the rest of the chat view reads. Legacy single-session threads (0 or 1
+ * session) are returned unchanged so their behavior is byte-for-byte identical.
+ */
+export function scopeThreadToSession<
+  T extends Pick<Thread, "messages" | "session" | "sessions" | "latestTurn">,
+>(thread: T, sessionId: SessionId): T {
+  const sessions = thread.sessions;
+  if (!sessions || sessions.length <= 1) {
+    return thread;
+  }
+  const target = sessions.find((session) => sessionIdOf(session) === sessionId) ?? sessions[0];
+  if (!target) {
+    return thread;
+  }
+  const targetId = sessionIdOf(target);
+  const defaultId = thread.session ? sessionIdOf(thread.session) : DEFAULT_SESSION_ID;
+  const isDefault = targetId === defaultId;
+  return {
+    ...thread,
+    messages: thread.messages.filter(
+      (message) => (message.sessionId ?? DEFAULT_SESSION_ID) === targetId,
+    ),
+    session: target,
+    latestTurn: isDefault ? thread.latestTurn : (target.latestTurn ?? null),
   };
 }
 

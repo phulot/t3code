@@ -17,6 +17,7 @@ import {
   PositiveInt,
   ProjectId,
   ProviderItemId,
+  SessionId,
   ThreadId,
   TriggerId,
   TrimmedNonEmptyString,
@@ -403,6 +404,10 @@ export const OrchestrationMessage = Schema.Struct({
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   turnId: Schema.NullOr(TurnId),
   streaming: Schema.Boolean,
+  // Session (chat) this message belongs to within its thread. Optional during the
+  // multi-session migration: pre-multi-session payloads decode without it and the
+  // read model treats a missing id as the thread's single "default" session.
+  sessionId: Schema.optional(SessionId),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -440,14 +445,41 @@ export const OrchestrationSessionStatus = Schema.Literals([
 ]);
 export type OrchestrationSessionStatus = typeof OrchestrationSessionStatus.Type;
 
+const OrchestrationLatestTurnState = Schema.Literals([
+  "running",
+  "interrupted",
+  "completed",
+  "error",
+]);
+export type OrchestrationLatestTurnState = typeof OrchestrationLatestTurnState.Type;
+
+export const OrchestrationLatestTurn = Schema.Struct({
+  turnId: TurnId,
+  state: OrchestrationLatestTurnState,
+  requestedAt: IsoDateTime,
+  startedAt: Schema.NullOr(IsoDateTime),
+  completedAt: Schema.NullOr(IsoDateTime),
+  assistantMessageId: Schema.NullOr(MessageId),
+  sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+});
+export type OrchestrationLatestTurn = typeof OrchestrationLatestTurn.Type;
+
 export const OrchestrationSession = Schema.Struct({
   threadId: ThreadId,
+  // Identity of the session within its thread. Optional during the multi-session
+  // migration: payloads from pre-multi-session servers decode without it, and the
+  // read model treats a missing id as the thread's single "default" session.
+  sessionId: Schema.optional(SessionId),
   status: OrchestrationSessionStatus,
   providerName: Schema.NullOr(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),
+  // Per-session latest turn. Optional & additive: lets clients resolve turn state
+  // per session (chat) while the thread-level `latestTurn` stays the default/active
+  // session's turn for backward compatibility.
+  latestTurn: Schema.optional(Schema.NullOr(OrchestrationLatestTurn)),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationSession = typeof OrchestrationSession.Type;
@@ -494,25 +526,6 @@ export const OrchestrationThreadActivity = Schema.Struct({
 });
 export type OrchestrationThreadActivity = typeof OrchestrationThreadActivity.Type;
 
-const OrchestrationLatestTurnState = Schema.Literals([
-  "running",
-  "interrupted",
-  "completed",
-  "error",
-]);
-export type OrchestrationLatestTurnState = typeof OrchestrationLatestTurnState.Type;
-
-export const OrchestrationLatestTurn = Schema.Struct({
-  turnId: TurnId,
-  state: OrchestrationLatestTurnState,
-  requestedAt: IsoDateTime,
-  startedAt: Schema.NullOr(IsoDateTime),
-  completedAt: Schema.NullOr(IsoDateTime),
-  assistantMessageId: Schema.NullOr(MessageId),
-  sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
-});
-export type OrchestrationLatestTurn = typeof OrchestrationLatestTurn.Type;
-
 export const ThreadTitleRegeneration = Schema.Struct({
   requestId: CommandId,
   startedAt: IsoDateTime,
@@ -553,7 +566,12 @@ export const OrchestrationThread = Schema.Struct({
   ),
   activities: Schema.Array(OrchestrationThreadActivity),
   checkpoints: Schema.Array(OrchestrationCheckpointSummary),
+  // Legacy single-session view: the thread's active/default session. Retained for
+  // backward compatibility; `sessions` is the multi-session source of truth.
   session: Schema.NullOr(OrchestrationSession),
+  // All sessions (chats) hosted by this thread, sharing its worktree. Optional so
+  // pre-multi-session payloads decode; when absent, clients fall back to `session`.
+  sessions: Schema.optional(Schema.Array(OrchestrationSession)),
 });
 export type OrchestrationThread = typeof OrchestrationThread.Type;
 
@@ -879,6 +897,9 @@ export const ThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
   threadId: ThreadId,
+  // Target session within the thread. Optional: absent means the thread's
+  // "default" session (legacy single-session threads and the first chat).
+  sessionId: Schema.optional(SessionId),
   message: Schema.Struct({
     messageId: MessageId,
     role: Schema.Literal("user"),
@@ -900,6 +921,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   message: Schema.Struct({
     messageId: MessageId,
     role: Schema.Literal("user"),
@@ -919,6 +941,7 @@ const ThreadTurnInterruptCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.interrupt"),
   commandId: CommandId,
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   turnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,
 });
@@ -927,6 +950,7 @@ const ThreadApprovalRespondCommand = Schema.Struct({
   type: Schema.Literal("thread.approval.respond"),
   commandId: CommandId,
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   requestId: ApprovalRequestId,
   decision: ProviderApprovalDecision,
   createdAt: IsoDateTime,
@@ -936,6 +960,7 @@ const ThreadUserInputRespondCommand = Schema.Struct({
   type: Schema.Literal("thread.user-input.respond"),
   commandId: CommandId,
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
   createdAt: IsoDateTime,
@@ -951,6 +976,18 @@ const ThreadCheckpointRevertCommand = Schema.Struct({
 
 const ThreadSessionStopCommand = Schema.Struct({
   type: Schema.Literal("thread.session.stop"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
+  createdAt: IsoDateTime,
+});
+
+// Create a fresh chat session inside an existing thread. The server mints the
+// SessionId — sessions are never client-supplied — and seeds it idle. The
+// thread's implicit "default" session is created with the thread itself, so
+// this is only for the second and subsequent chats sharing the worktree.
+const ThreadSessionCreateCommand = Schema.Struct({
+  type: Schema.Literal("thread.session.create"),
   commandId: CommandId,
   threadId: ThreadId,
   createdAt: IsoDateTime,
@@ -1027,6 +1064,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  ThreadSessionCreateCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -1057,6 +1095,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  ThreadSessionCreateCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
@@ -1389,6 +1428,7 @@ export const ThreadInteractionModeSetPayload = Schema.Struct({
 
 export const ThreadMessageSentPayload = Schema.Struct({
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   messageId: MessageId,
   role: OrchestrationMessageRole,
   text: Schema.String,
@@ -1401,6 +1441,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   messageId: MessageId,
   modelSelection: Schema.optional(ModelSelection),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
@@ -1414,12 +1455,14 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
 
 export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   turnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,
 });
 
 export const ThreadApprovalResponseRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   requestId: ApprovalRequestId,
   decision: ProviderApprovalDecision,
   createdAt: IsoDateTime,
@@ -1427,6 +1470,7 @@ export const ThreadApprovalResponseRequestedPayload = Schema.Struct({
 
 const ThreadUserInputResponseRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
   createdAt: IsoDateTime,
@@ -1445,6 +1489,7 @@ export const ThreadRevertedPayload = Schema.Struct({
 
 export const ThreadSessionStopRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  sessionId: Schema.optional(SessionId),
   createdAt: IsoDateTime,
 });
 

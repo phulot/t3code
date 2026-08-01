@@ -12,10 +12,12 @@ import type {
 } from "@t3tools/contracts";
 import {
   ApprovalRequestId,
+  DEFAULT_SESSION_ID,
   EventId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionStartInput,
+  SessionId,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -132,8 +134,11 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
   );
 
   const interruptTurn = vi.fn(
-    (_threadId: ThreadId, _turnId?: TurnId): Effect.Effect<void, ProviderAdapterError> =>
-      Effect.void,
+    (
+      _threadId: ThreadId,
+      _turnId?: TurnId,
+      _sessionId?: SessionId,
+    ): Effect.Effect<void, ProviderAdapterError> => Effect.void,
   );
 
   const respondToRequest = vi.fn(
@@ -141,6 +146,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       _threadId: ThreadId,
       _requestId: string,
       _decision: ProviderApprovalDecision,
+      _sessionId?: SessionId,
     ): Effect.Effect<void, ProviderAdapterError> => Effect.void,
   );
 
@@ -149,6 +155,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       _threadId: ThreadId,
       _requestId: string,
       _answers: Record<string, unknown>,
+      _sessionId?: SessionId,
     ): Effect.Effect<void, ProviderAdapterError> => Effect.void,
   );
 
@@ -865,7 +872,9 @@ routing.layer("ProviderServiceLive routing", (it) => {
       assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
 
       yield* provider.interruptTurn({ threadId: session.threadId });
-      assert.deepEqual(routing.codex.interruptTurn.mock.calls, [[session.threadId, undefined]]);
+      assert.deepEqual(routing.codex.interruptTurn.mock.calls, [
+        [session.threadId, undefined, DEFAULT_SESSION_ID],
+      ]);
 
       yield* provider.respondToRequest({
         threadId: session.threadId,
@@ -873,7 +882,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         decision: "accept",
       });
       assert.deepEqual(routing.codex.respondToRequest.mock.calls, [
-        [session.threadId, asRequestId("req-1"), "accept"],
+        [session.threadId, asRequestId("req-1"), "accept", DEFAULT_SESSION_ID],
       ]);
 
       yield* provider.respondToUserInput({
@@ -890,6 +899,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
           {
             sandbox_mode: "workspace-write",
           },
+          DEFAULT_SESSION_ID,
         ],
       ]);
 
@@ -1106,7 +1116,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
       assert.equal(codexSession.provider, "codex");
       assert.equal(claudeSession.provider, "claudeAgent");
-      assert.deepEqual(routing.codex.stopSession.mock.calls, [[threadId]]);
+      assert.deepEqual(routing.codex.stopSession.mock.calls, [[threadId, DEFAULT_SESSION_ID]]);
       assert.equal(routing.claude.stopSession.mock.calls.length, 0);
 
       const sessions = yield* provider.listSessions();

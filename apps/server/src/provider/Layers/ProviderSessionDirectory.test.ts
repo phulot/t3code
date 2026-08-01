@@ -4,7 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ProviderDriverKind, ThreadId } from "@t3tools/contracts";
+import { DEFAULT_SESSION_ID, ProviderDriverKind, SessionId, ThreadId } from "@t3tools/contracts";
 import { it, assert } from "@effect/vitest";
 import { assertSome } from "@effect/vitest/utils";
 import * as Effect from "effect/Effect";
@@ -75,6 +75,62 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
 
       const threadIds = yield* directory.listThreadIds();
       assert.deepEqual(threadIds, [nextThreadId]);
+    }));
+
+  it("keeps two sessions of one thread as independent runtimes", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+
+      const threadId = ThreadId.make("thread-multi-session");
+      const sessionA = SessionId.make("session-a");
+      const sessionB = SessionId.make("session-b");
+
+      yield* directory.upsert({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        sessionId: sessionA,
+        status: "running",
+        runtimePayload: { cwd: "/tmp/a" },
+      });
+      yield* directory.upsert({
+        provider: ProviderDriverKind.make("claudeAgent"),
+        threadId,
+        sessionId: sessionB,
+        status: "starting",
+        runtimePayload: { cwd: "/tmp/b" },
+      });
+
+      // Each (thread, session) resolves to its own binding.
+      const bindingA = yield* directory.getBinding(threadId, sessionA);
+      const bindingB = yield* directory.getBinding(threadId, sessionB);
+      assert.equal(Option.isSome(bindingA), true);
+      assert.equal(Option.isSome(bindingB), true);
+      if (Option.isSome(bindingA) && Option.isSome(bindingB)) {
+        assert.equal(bindingA.value.sessionId, sessionA);
+        assert.equal(bindingA.value.provider, "codex");
+        assert.equal(bindingA.value.status, "running");
+        assert.equal(bindingB.value.sessionId, sessionB);
+        assert.equal(bindingB.value.provider, "claudeAgent");
+        assert.equal(bindingB.value.status, "starting");
+      }
+
+      // A single thread now owns two distinct session runtimes.
+      const perThread = yield* directory.listByThreadId(threadId);
+      assert.equal(perThread.length, 2);
+      const sessionIds = perThread.map((binding) => binding.sessionId).sort();
+      assert.deepEqual(sessionIds, [sessionA, sessionB].sort());
+
+      // Updating one session must not disturb the other.
+      yield* directory.upsert({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        sessionId: sessionA,
+        status: "stopped",
+      });
+      const afterA = yield* directory.getBinding(threadId, sessionA);
+      const afterB = yield* directory.getBinding(threadId, sessionB);
+      if (Option.isSome(afterA)) assert.equal(afterA.value.status, "stopped");
+      if (Option.isSome(afterB)) assert.equal(afterB.value.status, "starting");
     }));
 
   it("persists runtime fields and merges payload updates", () =>
@@ -167,6 +223,7 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
       assert.deepEqual(bindings, [
         {
           threadId: olderThreadId,
+          sessionId: DEFAULT_SESSION_ID,
           provider: ProviderDriverKind.make("claudeAgent"),
           adapterKey: "claudeAgent",
           runtimeMode: "approval-required",
@@ -181,6 +238,7 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
         },
         {
           threadId: newerThreadId,
+          sessionId: DEFAULT_SESSION_ID,
           provider: ProviderDriverKind.make("codex"),
           adapterKey: "codex",
           runtimeMode: "full-access",
